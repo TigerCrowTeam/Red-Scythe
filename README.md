@@ -10,12 +10,15 @@ deferred. GMSK and QPSK use the shorter five-minute qualification requested for
 this version. Configurable settings are not performance guarantees: see
 [final measurements](MODULATION_RESULTS.md) and [supported settings](docs/CONFIGURATION.md).
 
+Development is moving toward **version 1.1**, focused on configurable radio
+emulation. Version 1.0.0 remains the packaged baseline. The
+[version 1.1 roadmap](docs/RADIO_V1_1_ROADMAP.md) defines the planned milestones
+and acceptance gates; implementation has not started.
+
 The distribution and commands are named **`packet-radio`**; Python imports use
 **`packet_radio`**. See [migration](docs/CONFIGURATION.md#upgrading-to-packet-radio-100)
 when updating an older `telemetry-radio` installation.
 
-- [Roadmap](docs/RADIO_V1_ROADMAP.md)
-- [First-version requirements](docs/RADIO_V1_REQUIREMENTS.md)
 - [Usage and architecture guide](docs/PROGRAM_GUIDE.md)
 - [Current packet protocol](docs/PROTOCOL.md)
 
@@ -34,7 +37,7 @@ tests/
     protocol/             Packet codec, authentication and reliability tests
     hardware/             Mocked UHD, tuning and hardware-clock tests
     integration/          Application, configuration, endpoints and tooling tests
-docs/                     Guides, requirements and roadmap
+docs/                     Configuration, protocol, operating guides and 1.1 roadmap
 tools/                    Hardware diagnostics and qualification runners
 fixtures/                 Protocol-v5 reference packets
 ```

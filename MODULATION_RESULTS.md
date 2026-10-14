@@ -3,7 +3,8 @@
 This is the single maintained results record. Update the relevant modulation here
 when qualification changes; do not create per-step status or completion documents.
 Only final summaries are retained in the repository. Implementation details belong in
-`docs/PROTOCOL.md` and `docs/CONFIGURATION.md`; remaining work belongs in `docs/RADIO_V1_ROADMAP.md`.
+`docs/PROTOCOL.md` and `docs/CONFIGURATION.md`. Planned work belongs in the
+[version 1.1 roadmap](docs/RADIO_V1_1_ROADMAP.md).
 
 ## Qualification summary
 
