@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+coverage.xml
+.mypy_cache/
+.ruff_cache/
+.venv/
+.venv-uhd/
+*.egg-info/
+build/
+dist/
+captures/
+keys/
+state/
+docs/RADIO_V1_ROADMAP.md

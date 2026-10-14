@@ -1,0 +1,56 @@
+# Startup profile; use the documented attenuated setup for hardware testing.
+schema_version: 1
+node_id: 2
+peer_id: 1
+timing_role: follower
+endpoint:
+  bind_host: 127.0.0.1
+  bind_port: 50200
+  destination_host: 127.0.0.1
+  destination_port: 50201
+authentication:
+  private_key_file: keys/peer-b-private.pem
+  public_key_files:
+    1: keys/peer-a-public.pem
+    2: keys/peer-b-public.pem
+  replay_state_file: state/peer-b-replay.json
+link:
+  queue_size: 256
+  control_queue_size: 32
+  ack_timeout_seconds: 0.25
+  max_retries: 4
+  tdd_period_seconds: 0.18
+  tdd_guard_seconds: 0.002
+  tdd_inter_burst_seconds: 0.002
+  tdd_leader_bursts_per_slot: 8
+  tdd_follower_bursts_per_slot: 8
+  hardware_timed_io: true
+  hardware_clock_sync: true
+status:
+  output: text
+  http_host: 127.0.0.1
+  http_port: 8766
+radio:
+  center_frequency_hz: 915000000
+  sample_rate_hz: 2000000
+  bandwidth_hz: 1000000
+  tx_gain_db: 20
+  rx_gain_db: 40
+  tx_antenna: TX/RX
+  rx_antenna: RX2
+  device:
+    type: b200
+    serial: '3457480'
+modem:
+  modulation: 2fsk
+  frequency_deviation_hz: 125000
+  bit_rate_bps: 250000
+  decoder_worker_enabled: true
+error_correction:
+  scheme: extended-hamming-8-4
+  interleaver_depth: 16
+  bit_repetitions: 1
+  rs_parity_bytes: 0
+packet:
+  format: generic-v5
+  max_payload_bytes: 1024
