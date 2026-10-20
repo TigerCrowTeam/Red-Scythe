@@ -328,3 +328,17 @@ def test_hardware_hop_check_rejects_invalid_arguments_before_open(rate, address,
 
     with pytest.raises(ValueError):
         run(6, ["a", "b"], phase, address, rate)
+
+
+@pytest.mark.parametrize(
+    "rate,address",
+    [(float("nan"), "x"), (float("inf"), "x"), (0, "x"), (4.1, "x"), (3, None)],
+)
+def test_experimental_hop_check_rejects_invalid_arguments_before_open(monkeypatch, rate, address):
+    from tools import hopping_check
+
+    opened = Mock(side_effect=AssertionError("must not open hardware"))
+    monkeypatch.setattr(hopping_check, "SharedRadios", opened)
+    with pytest.raises(ValueError, match="experimental rate"):
+        hopping_check.run(6, ["a", "b"], shared_address=address, experimental_rate=rate)
+    opened.assert_not_called()

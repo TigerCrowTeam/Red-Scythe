@@ -1,13 +1,14 @@
 # General-Purpose SDR Packet Radio
 
-Packet Radio 1.1.0 carries arbitrary binary packets between two Ettus UHD SDRs.
+Packet Radio 1.1.0 carries arbitrary binary packets between two radio endpoints using Ettus UHD.
 Applications submit and receive packets through local UDP sockets. BPSK, 2FSK,
 MSK and GMSK are the release-focus modulations; QPSK is retained and tested.
 
-The supported measured setup is two B205mini radios on one Ubuntu workstation,
-connected through attenuated cables. Independent-computer qualification remains
-deferred. GMSK and QPSK use the shorter five-minute qualification requested for
-this version. Configurable settings are not performance guarantees: see
+The reference setup is one X310 with two UBX-160 channels on one workstation,
+connected through crossed, attenuated cables. Two B205mini radios were also
+measured; the final comparison records their PSK delivery/recovery and QPSK RX
+overflow limitations. Independent-computer qualification remains deferred.
+Configurable settings are not performance guarantees: see the hardware-specific
 [final measurements](MODULATION_RESULTS.md) and [supported settings](docs/CONFIGURATION.md).
 
 **Version 1.1.0** adds configurable radio emulation. The
@@ -39,6 +40,9 @@ when updating an older `telemetry-radio` installation.
 
 - [Usage and architecture guide](docs/PROGRAM_GUIDE.md)
 - [Current packet protocol](docs/PROTOCOL.md)
+- [Program guide](docs/PROGRAM_GUIDE.md) — what the radio does, its architecture, data flow and runtime behavior.
+- [Terminal GUI guide](docs/TERMINAL_GUI_GUIDE.md) — editable fields, choices, units and limits for radio setup and packet building.
+- [Terminal configuration interface](docs/TERMINAL_UI_PLAN.md) — modulation-specific forms, saved projects and radio start/stop/status.
 
 ## Repository layout
 
@@ -46,7 +50,10 @@ when updating an older `telemetry-radio` installation.
 README.md                 Getting started
 MODULATION_RESULTS.md     Final modulation summaries
 packet_radio/          Application, transmit/receive processing, modems, protocol and hardware
-    cli/                  Optional command-line tools
+    cli/                  Command-line entry points
+    configuration/        Field catalog, validation, drafts and atomic project storage
+    tui/                  Optional Textual editor, dialogs and live status display
+    runtime/              Owned child lifecycle and read-only status monitoring
 configs/
     examples/             Generic paired profiles to customize
     bench/                Profiles for the tested local SDR pair
@@ -103,13 +110,26 @@ cd /tmp
 python "$VIRTUAL_ENV/share/packet-radio/tools/check_install.py"
 ```
 
+`check_install.py` checks the optional editor dependency as well as the headless
+commands, bundled profiles, signed simulated delivery and capture replay. After
+installing the same wheel with `[ui]`, run the shorter installed-editor workflow:
+
+```bash
+cd /tmp
+python "$VIRTUAL_ENV/share/packet-radio/tools/check_ui_install.py"
+```
+
+It exercises editing, saving, reopening, peer export and owned start/stop with a
+fake radio child. It opens no SDR and transmits no RF. Without the UI extra, the
+same check verifies that the missing-dependency message explains how to install it.
+
 ## Develop and verify without hardware
 
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install -e '.[dev]'
+python -m pip install -e '.[dev,ui]'
 python -m pytest -q
 python -m packet_radio.cli.conformance
 python -m packet_radio.cli.validate configs/examples/peer-a-bpsk.yaml configs/examples/peer-b-bpsk.yaml
@@ -119,6 +139,92 @@ Validation does not open sockets, load private keys, or access an SDR unless
 `--hardware` is explicitly selected. Paired validation checks identities, timing
 roles, waveform, frequency schedule, payload limit, and authentication enablement.
 Unknown configuration keys fail rather than being silently ignored.
+
+The terminal editor supports offline drafts, modulation-specific controls,
+validation, saving, peer export and owned radio start/stop. See the
+[terminal interface plan](docs/TERMINAL_UI_PLAN.md). To launch it:
+
+```bash
+python -m pip install -e '.[ui,test]'
+packet-radio-ui
+# Or: packet-radio-ui configs/v1_1/peer-a-simple.yaml
+python -m pytest -q tests/configuration tests/tui tests/runtime
+```
+
+Use Tab/Shift+Tab to navigate, Enter to apply text, F5 to validate, F2 for Advanced,
+F8 to focus an error, Ctrl+O to open, Ctrl+N for a new draft and Ctrl+Q to quit. Selecting a modulation
+applies its preset waveform settings and shows only applicable controls.
+Use Ctrl+S to save, F4 for Save As, F6 to export a complementary peer and F7 to
+import a legacy schema-1 configuration into a new schema-2 draft. Editing and
+saving work offline. Hardware access happens only through explicit checks:
+
+- **F9:** refresh devices; **F3:** view results and select a discovered device.
+- **F10:** check the current draft against the selected SDR.
+- **Ctrl+P:** select a second node YAML and check a shared X310 pair.
+- **F11:** cancel an active check; **F3:** view capabilities and actual settings.
+
+Checks run in an owned child process with a 30-second timeout, using the editor's
+Python interpreter. That interpreter must have the UHD bindings installed (see
+[UHD setup](docs/UHD_SETUP.md)). Checking applies tuning, gain, rate and antenna
+settings; stop other software using that SDR first. It creates no streams and
+sends no packets. Results distinguish software validity, device compatibility and
+RF performance; edits invalidate the checked snapshot. The check reports device
+adjustments, including the UBX-160's fixed 160 MHz analog bandwidth. Hardware
+capability ranges do not guarantee every intermediate sample rate or measured
+throughput. The editor can also run saved configurations:
+
+- **Ctrl+R / Start:** start one saved node.
+- **Ctrl+Shift+R / Start pair:** select a saved peer for a shared X310 launch.
+- **Ctrl+B / Packets:** [build and edit packets](docs/TERMINAL_GUI_GUIDE.md#build-modify-and-inspect-packets), save templates, preview framing, send/repeat and inspect received data.
+- **Ctrl+T or Ctrl+C:** stop the owned radio; **F12:** view live per-channel status, run settings and logs.
+
+Start shows the operating mode and requires saving pending edits first. Generic-v5
+without keys requires the same explicit isolated-bench unauthenticated opt-in as
+the CLI. Starting transmit-capable modes may emit control traffic without a UDP
+payload. The child uses a frozen temporary configuration; edits cannot change a
+running radio. Stop and restart to apply new settings.
+
+Running means hardware, payload endpoints and status services have initialized;
+it does not mean RF acquisition or payload delivery. Startup has a 30-second
+timeout. Stop allows five seconds for graceful cleanup, then kills only the owned
+child if necessary. Normal quit stops that child; Linux parent-death protection
+also kills it if the editor exits unexpectedly. This owned launch mode requires
+Linux. The editor never adopts or stops another process based on a status port.
+Hardware discovery/probing is disabled while its radio is active. Run logs stay
+in memory; no additional result/status files are created.
+
+F12 refreshes each channel's read-only status at up to 2 Hz. It shows RF acquisition,
+peer activity, payload delivery and throughput separately from process readiness,
+plus frequency readbacks, waveform/rate, queues, ACK backlog, decoding counters
+and UHD errors. A run ID, process ID and effective-configuration fingerprint must
+match before readings are accepted. Failed requests, repeated snapshots and old
+readings are marked stale; stopped sessions show historical values only. HTTP
+status must be enabled in the saved node settings for live readings. Missing or
+inapplicable fields appear as N/A. Ctrl+T and Ctrl+C also stop from the details
+dialog. No network control endpoint is added.
+
+The terminal interface passed the [conducted X310 acceptance matrix](MODULATION_RESULTS.md#terminal-interface-x310-qualification-2026-10-20)
+for all five generic modulations, custom simple 2FSK and phase-coordinated hopping.
+Hopping retains its whole-burst boundary-drop policy; F12 shows admission drops
+and hop timing diagnostics. Arbitrary packet-arrival phases can still lose bursts.
+
+Choose a new node YAML path outside the shipped `configs/` templates. Saving
+creates that node and an immutable `profiles/<fingerprint>.yaml` beside it.
+Reopen the node with Ctrl+O or `packet-radio-ui /path/to/node.yaml`. YAML comments
+and formatting are normalized; supported settings and the locations referred to
+by key, recording and replay-state paths are preserved. External source edits
+block saving until you reopen the project. Existing unrelated files are never
+overwritten. Old profiles are retained so a failed save cannot break the old node.
+
+Peer export asks for an explicit SDR identifier and separate ports. Authenticated
+peers also require their own private-key and replay-state paths. Export does not
+copy keys, replay state or recordings; verify the exported paths on the peer's
+host before running. Legacy conversion supports validated fixed-frequency,
+`generic-v5` schema-1 configurations and always requires a new destination:
+
+```bash
+packet-radio-ui --import-legacy /path/to/legacy.yaml
+```
 
 ## Software-only packet exchange
 

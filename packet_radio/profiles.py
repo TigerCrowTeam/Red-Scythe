@@ -101,27 +101,57 @@ FRAME_FIELDS = {f.name for f in fields(FrameSettings)} - {
 META = {"profile_version", "id", "revision", "reference", "qualification", "limitations"}
 SECTIONS = {"waveform", "frequency", "packet", "protection", "link"}
 
+# Parser-owned field inventories also let offline editors detect schema drift.
+NODE_FIELDS = {
+    "schema_version",
+    "profile",
+    "overrides",
+    "node_id",
+    "peer_id",
+    "timing_role",
+    "operation",
+    "input_kind",
+    "hardware",
+    "runtime",
+    "endpoint",
+    "authentication",
+    "recording",
+    "status",
+    "log_level",
+}
+HARDWARE_FIELDS = {
+    "device",
+    "tx_gain",
+    "rx_gain",
+    "tx_antenna",
+    "rx_antenna",
+    "channel",
+    "open_retry_attempts",
+    "open_retry_seconds",
+}
+FIXED_FREQUENCY_FIELDS = {"mode", "center_frequency_hz"}
+HOPPING_FREQUENCY_FIELDS = {
+    "mode",
+    "frequencies_hz",
+    "dwell_seconds",
+    "guard_seconds",
+    "epoch",
+    "synchronization",
+    "sequence_mode",
+    "repeated_frequencies",
+}
+PACKET_FIELDS = {"format", "max_payload_bytes", "frame"}
+
 
 def normalize_frequency(raw) -> dict:
     """Freeze the external-UTC hopping contract; reject unmeasured fast settings."""
     if not isinstance(raw, dict):
         raise ValueError("frequency must be a mapping")
     if raw.get("mode") == "fixed":
-        result = mapping(
-            raw, {"mode", "center_frequency_hz"}, {"mode", "center_frequency_hz"}, "frequency"
-        )
+        result = mapping(raw, FIXED_FREQUENCY_FIELDS, FIXED_FREQUENCY_FIELDS, "frequency")
         values = [result["center_frequency_hz"]]
     elif raw.get("mode") == "hopping":
-        keys = {
-            "mode",
-            "frequencies_hz",
-            "dwell_seconds",
-            "guard_seconds",
-            "epoch",
-            "synchronization",
-            "sequence_mode",
-            "repeated_frequencies",
-        }
+        keys = HOPPING_FREQUENCY_FIELDS
         result = mapping(raw, keys, keys, "frequency")
         values = result["frequencies_hz"]
         if not isinstance(values, list) or not 2 <= len(values) <= 256:
@@ -202,7 +232,7 @@ def normalize_definition(raw) -> dict:
     freq = normalize_frequency(raw["frequency"])
     packet = mapping(
         raw["packet"],
-        {"format", "max_payload_bytes", "frame"},
+        PACKET_FIELDS,
         {"format", "max_payload_bytes"},
         "packet",
     )
@@ -382,46 +412,23 @@ def validate_resolved(config: RadioConfig) -> None:
             raise ValueError(f"resolved link {key} disagrees")
 
 
-def load_v2(raw: dict, path: Path) -> RadioConfig:
-    allowed = {
-        "schema_version",
-        "profile",
-        "overrides",
-        "node_id",
-        "peer_id",
-        "timing_role",
-        "operation",
-        "input_kind",
-        "hardware",
-        "runtime",
-        "endpoint",
-        "authentication",
-        "recording",
-        "status",
-        "log_level",
-    }
+def load_v2(raw: dict, path: Path, *, definition: dict | None = None) -> RadioConfig:
+    """Resolve a node, optionally using an in-memory profile instead of reading it."""
     raw = mapping(
         raw,
-        allowed,
+        NODE_FIELDS,
         {"schema_version", "profile", "node_id", "peer_id", "timing_role", "hardware"},
         "node",
     )
     if not isinstance(raw["profile"], str) or not raw["profile"].strip():
         raise ValueError("profile must be a file path")
-    definition = normalize_definition(read_yaml(path.parent / raw["profile"]))
+    definition = normalize_definition(
+        read_yaml(path.parent / raw["profile"]) if definition is None else definition
+    )
     definition = merge_overrides(definition, raw.get("overrides", {}))
     hardware = mapping(
         raw["hardware"],
-        {
-            "device",
-            "tx_gain",
-            "rx_gain",
-            "tx_antenna",
-            "rx_antenna",
-            "channel",
-            "open_retry_attempts",
-            "open_retry_seconds",
-        },
+        HARDWARE_FIELDS,
         {"device", "tx_gain", "rx_gain", "tx_antenna", "rx_antenna"},
         "hardware",
     )

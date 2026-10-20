@@ -6,6 +6,9 @@ Prints summaries only. Default duration is five minutes plus boundary/recovery
 checks. The radios must have crossed TX/RX-to-RX2 cables with 30 dB attenuation.
 Timing observations use host UTC and device timestamps, not an RF instrument.
 The optional 2 hop/s run selects the separate X310 profile; 1 hop/s stays default.
+Experimental rates use an in-memory schedule override after normal initialization,
+queue maximum-size packets early on both channels, and never change supported
+profiles or GUI limits. They measure this application's limits, not hardware limits.
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ from packet_radio.app import RadioApp
 from packet_radio.config import load_config
 from packet_radio.endpoint import MemoryEndpoint
 from packet_radio.hardware.shared import SharedRadios
+from packet_radio.scheduler import FrequencyScheduler
 
 ERRORS = (
     "rx_overflows",
@@ -44,16 +48,31 @@ def run(
     first_phase: float = 0.2,
     shared_address=None,
     hop_rate: int = 1,
+    *,
+    experimental_rate: float | None = None,
 ):
     if hop_rate not in (1, 2) or (hop_rate == 2 and not shared_address):
         raise ValueError("2 hops/s requires the shared X310")
+    if experimental_rate is not None:
+        if (
+            not shared_address
+            or not math.isfinite(experimental_rate)
+            or not 1 <= experimental_rate <= 4
+        ):
+            raise ValueError("experimental rate requires a shared X310 and 1..4 hops/s")
+        hop_rate = experimental_rate
     dwell, guard = 1 / hop_rate, 0.1
     second_phase = max(0.3, dwell / 2)
     if not math.isfinite(first_phase) or not 0.15 <= first_phase < second_phase - 0.05:
         raise ValueError("first phase must leave time for acquisition and the second packet")
+    if experimental_rate is not None:
+        # Queue before the post-tune wait expires. Production admission still
+        # determines when each packet can actually be modulated and transmitted.
+        first_phase = second_phase = guard
     if type(seconds) is not int or seconds < 6 or len(serials) != 2:
         raise ValueError("need at least six seconds and two serial placeholders")
-    slots = seconds * hop_rate
+    slots = math.ceil(seconds * hop_rate)
+    seconds = slots * dwell
 
     root = Path(__file__).resolve().parents[1]
     apps, threads, failures = [], [], []
@@ -92,7 +111,7 @@ def run(
 
     configs = []
     for i, serial in enumerate(serials):
-        suffix = "x310-hopping" if hop_rate == 2 else "hopping"
+        suffix = "x310-hopping" if hop_rate > 1 else "hopping"
         cfg = load_config(root / f"configs/v1_1/peer-{'ab'[i]}-{suffix}.yaml")
         configs.append(
             replace(
@@ -117,6 +136,14 @@ def run(
                 cfg, endpoint=MemoryEndpoint(), sdr=None if shared is None else shared.radios[i]
             )
             apps.append(app)
+            if experimental_rate is not None:
+                # Deliberately isolated benchmark override: do not weaken profile
+                # validation or save this unqualified schedule as a normal config.
+                app.config = replace(
+                    app.config,
+                    frequency=replace(app.config.frequency, interval_seconds=dwell),
+                )
+                app.scheduler = FrequencyScheduler(app.config.frequency, clock=app.wall_clock)
             raw = app.sdr.radio
             stopped_at = [None]
             original_stop, original_start = raw._stop_receive, raw._start_receive
@@ -186,26 +213,61 @@ def run(
             thread = threading.Thread(target=worker, args=(i, app), daemon=True)
             threads.append(thread)
             thread.start()
-        start = math.ceil(time.time()) + 2
+        start = math.ceil((time.time() + 2) / dwell) * dwell
+        print(
+            f"{'EXPERIMENTAL' if experimental_rate is not None else 'QUALIFICATION'}: "
+            f"{hop_rate:g} hops/s, dwell={dwell * 1000:.3f} ms, "
+            f"guard={guard * 1000:.0f} ms; {slots} steady packets each direction; "
+            f"payload={1024 if experimental_rate is not None else 256} bytes",
+            flush=True,
+        )
         wait_until(start - 0.1)
         baseline = [a.statistics.snapshot() for a in apps]
         expected = [[], []]
-        # One exact 256-byte packet each direction on every dwell, after acquisition guard.
+        # One exact packet each direction on every dwell; experiments stress the
+        # maximum payload and queue it before acquisition has necessarily finished.
         for slot in range(slots):
             for i, phase in ((0, first_phase), (1, second_phase)):
                 payload = bytes([i]) + slot.to_bytes(4, "big") + bytes(range(251))
+                if experimental_rate is not None:
+                    payload += bytes(1024 - len(payload))
                 expected[1 - i].append(payload)
                 send(i, payload, start + slot * dwell + phase)
         wait_until(start + seconds - 0.05)
+        steady = [a.statistics.snapshot() for a in apps]
+        for i in range(2):
+            counters = {
+                k: steady[i][k] - baseline[i][k]
+                for k in (
+                    *ERRORS,
+                    "hop_burst_rejections",
+                    "hop_slots_missed",
+                    "hop_tune_deadlines_missed",
+                )
+                if steady[i][k] != baseline[i][k]
+            }
+            usable = [t % dwell * 1000 for t, _ in valid_blocks[i] if start <= t < start + seconds]
+            print(
+                f"channel {i}: steady RX={len(apps[i].endpoint.inbound)}/{slots}; "
+                f"counters={counters}; decoder-ready max={max(usable, default=math.nan):.3f} ms",
+                flush=True,
+            )
         for i in range(2):
             assert list(apps[i].endpoint.inbound) == expected[i], (
                 i,
                 len(apps[i].endpoint.inbound),
                 len(expected[i]),
             )
-        steady = [a.statistics.snapshot() for a in apps]
+            for timestamp, payload in received[i]:
+                if payload in expected[i]:
+                    slot = int.from_bytes(payload[1:5], "big")
+                    assert start + slot * dwell <= timestamp < start + (slot + 1) * dwell, (
+                        "packet delivered outside its intended dwell",
+                        i,
+                        slot,
+                    )
         # One-minute payload boundaries, both directions, and deliberately too-late bursts.
-        boundary_slots = (60 if seconds >= 300 else 6) * hop_rate
+        boundary_slots = math.ceil((60 if seconds >= 300 else 6) * hop_rate)
         for slot in range(boundary_slots):
             size = (1, 64, 1024)[slot % 3]
             for i, phase in ((0, first_phase), (1, second_phase)):
@@ -218,7 +280,13 @@ def run(
         end = start + seconds + boundary_slots * dwell
         wait_until(end - 0.02)
         for i in range(2):
-            assert list(apps[i].endpoint.inbound) == expected[i], "boundary delivery mismatch"
+            assert list(apps[i].endpoint.inbound) == expected[i], (
+                "boundary delivery mismatch",
+                i,
+                len(apps[i].endpoint.inbound),
+                len(expected[i]),
+                apps[i].statistics.snapshot()["hop_burst_rejections"],
+            )
         assert all(a.statistics.snapshot()["hop_burst_rejections"] == boundary_slots for a in apps)
         # Hold peer B on an unrelated channel for 3 dwells. No physical reconnection needed.
         pauses[1].set()
@@ -232,7 +300,10 @@ def run(
             for i, phase in ((0, first_phase), (1, second_phase)):
                 payload = b"recovered" + bytes([i, slot])
                 expected[1 - i].append(payload)
-                send(i, payload, end + (3 + slot) * dwell + phase)
+                # Resumption starts 20 ms into the dwell. Allow the interrupted
+                # receiver its full tune/settle time before either peer sends.
+                recovery_phase = 0.16 if experimental_rate is not None else phase
+                send(i, payload, end + (3 + slot) * dwell + recovery_phase)
         wait_until(end + 6 * dwell)
         assert not failures, failures
         for i, app in enumerate(apps):
@@ -315,6 +386,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--shared-address", help="one X310 address, using channels 0 and 1")
     parser.add_argument("--hop-rate", type=int, choices=(1, 2), default=1)
+    parser.add_argument(
+        "--experimental-rate",
+        type=float,
+        help="shared X310 only: test 1..4 hops/s with 1024-byte early-queued packets; unqualified",
+    )
     parser.add_argument("--seconds", type=int, default=300)
     parser.add_argument("--serials", nargs=2, default=["3457464", "3457480"])
     parser.add_argument(
@@ -334,7 +410,14 @@ def main():
     logging.basicConfig(level=logging.ERROR)
     if args.hop_rate == 2 and not args.shared_address:
         parser.error("2 hops/s requires --shared-address")
-    run(args.seconds, args.serials, args.first_phase, args.shared_address, args.hop_rate)
+    run(
+        args.seconds,
+        args.serials,
+        args.first_phase,
+        args.shared_address,
+        args.hop_rate,
+        experimental_rate=args.experimental_rate,
+    )
 
 
 if __name__ == "__main__":

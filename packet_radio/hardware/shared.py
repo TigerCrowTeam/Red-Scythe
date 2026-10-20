@@ -52,7 +52,9 @@ class SharedRadios:
         self.stack.close()
 
 
-def run_pair(configs: list[RadioConfig], *, timing_diagnostics: bool = False) -> None:
+def run_pair(
+    configs: list[RadioConfig], *, timing_diagnostics: bool = False, on_ready=None, run_id=None
+) -> None:
     from packet_radio.app import RadioApp
 
     a, b = configs
@@ -64,6 +66,15 @@ def run_pair(configs: list[RadioConfig], *, timing_diagnostics: bool = False) ->
     errors: list[BaseException] = []
     threads: list[threading.Thread] = []
     stopped = threading.Event()
+    ready_lock = threading.Lock()
+    ready_count = 0
+
+    def channel_ready():
+        nonlocal ready_count
+        with ready_lock:
+            ready_count += 1
+            if ready_count == len(configs) and on_ready is not None:
+                on_ready()
 
     def stop(*_args: object) -> None:
         stopped.set()
@@ -72,7 +83,7 @@ def run_pair(configs: list[RadioConfig], *, timing_diagnostics: bool = False) ->
 
     def worker(app: RadioApp) -> None:
         try:
-            app.run()
+            app.run(**({"on_ready": channel_ready} if on_ready is not None else {}))
         except BaseException as exc:
             errors.append(exc)
         finally:
@@ -82,7 +93,12 @@ def run_pair(configs: list[RadioConfig], *, timing_diagnostics: bool = False) ->
         radios = SharedRadios(configs)
         stack.callback(radios.close)
         for config, radio in zip(configs, radios.radios):
-            app = RadioApp(config, sdr=radio, timing_diagnostics=timing_diagnostics)
+            app = RadioApp(
+                config,
+                sdr=radio,
+                timing_diagnostics=timing_diagnostics,
+                **({"run_id": run_id} if run_id is not None else {}),
+            )
             apps.append(app)
             stack.callback(app.close)
         for sig in (signal.SIGINT, signal.SIGTERM):

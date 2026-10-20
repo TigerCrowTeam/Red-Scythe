@@ -152,3 +152,52 @@ def test_runtime_batch_setting_reaches_backend_before_application_runs():
         assert result.statistics.snapshot()["packets_transmitted"] == 0
     finally:
         result.close()
+
+
+def test_readiness_requires_status_start_and_precedes_steps(app, monkeypatch):
+    events = []
+    status = Mock()
+    status.start.side_effect = lambda: events.append("status")
+    monkeypatch.setattr(application, "StatusService", Mock(return_value=status))
+
+    def step():
+        events.append("step")
+        app.stop()
+
+    monkeypatch.setattr(app, "step", step)
+    app.run(on_ready=lambda: events.append("ready"))
+    assert events == ["status", "ready", "step"]
+
+
+def test_failed_status_start_never_signals_ready(app, monkeypatch):
+    status = Mock()
+    status.start.side_effect = OSError("port already owned")
+    monkeypatch.setattr(application, "StatusService", Mock(return_value=status))
+    ready = Mock()
+    with pytest.raises(OSError, match="port already owned"):
+        app.run(on_ready=ready)
+    ready.assert_not_called()
+    assert app.sdr is None and app.endpoint is None
+
+
+def test_runtime_identity_and_frequency_readbacks_are_detached():
+    from packet_radio.runtime.identity import config_identity
+
+    config = node("leader", 1)
+    radio = SimulatedChannel().radio()
+    radio.actual_settings = {"rx_frequency": 915e6}
+    app = RadioApp(config, sdr=radio, endpoint=MemoryEndpoint(), run_id="owned-session")
+    try:
+        snapshot = app.statistics.snapshot()
+        assert snapshot["runtime"]["run_id"] == "owned-session"
+        assert snapshot["runtime"]["config_sha256"] == config_identity(config)
+        snapshot["runtime"]["run_id"] = "mutated"
+        assert app.statistics.snapshot()["runtime"]["run_id"] == "owned-session"
+        radio.actual_settings["rx_frequency"] = 916e6
+        app.statistics.set_hardware_readback(radio.actual_settings)
+        radio.actual_settings["rx_frequency"] = 917e6
+        updated = app.statistics.snapshot()
+        assert updated["hardware"]["actual_settings"]["rx_frequency"] == 916e6
+        assert updated["runtime"]["run_id"] == "owned-session"
+    finally:
+        app.close()

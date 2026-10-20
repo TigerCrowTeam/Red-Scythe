@@ -163,6 +163,14 @@ class LinkStatistics:
         with self._lock:
             self._radio_info = deepcopy({"configuration": configuration, "hardware": hardware})
 
+    def set_runtime_identity(self, identity: dict) -> None:
+        with self._lock:
+            self._radio_info["runtime"] = deepcopy(identity)
+
+    def set_hardware_readback(self, actual: dict) -> None:
+        with self._lock:
+            self._radio_info["hardware"] = {"actual_settings": deepcopy(actual)}
+
     def mark_activity(self, event: str) -> None:
         """Record validated frame acquisition or accepted peer traffic."""
         if event not in ("frame", "peer"):

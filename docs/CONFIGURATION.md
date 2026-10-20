@@ -1,4 +1,52 @@
-# Configuration schema 1
+# Configuration reference
+
+Both schema 1 and reusable schema-2 node/profile configurations are supported.
+The terminal editor saves schema 2; the sections below retain the schema-1
+reference and describe schema-2 framing, profiles and hopping further down.
+
+## Terminal editor settings
+
+Start `packet-radio-ui` for a new draft, or pass a saved schema-2 node path.
+The [terminal GUI guide](TERMINAL_GUI_GUIDE.md#terminal-configuration-and-operation) covers
+the fields you can type in or select, their units and their limits. No SDR is needed to edit.
+
+| Modulation | Waveform controls specific to the selection | Packet formats |
+|---|---|---|
+| BPSK | Pulse shaping; RRC rolloff/span when RRC is selected | generic-v5 |
+| 2FSK | Frequency deviation | generic-v5 or simple-frame-v1 |
+| MSK | Deviation derived from bit rate | generic-v5 |
+| GMSK | Gaussian BT and span; deviation derived from bit rate | generic-v5 |
+| QPSK | Pulse shaping; RRC rolloff/span when RRC is selected | generic-v5 |
+
+All expose center frequency, bit rate and applicable hardware settings. F2 reveals
+advanced controls; derived or unsupported fields remain read-only or absent.
+Changing modulation rebuilds its applicable controls and removes incompatible
+waveform settings. This does not add new backend capabilities.
+
+Generic-v5 has fixed framing. Simple 2FSK exposes preamble/sync, fixed or variable
+payload length, byte order, CRC selection and supported protection options. Fixed
+length hides variable-length fields; no CRC hides CRC byte order; disabled FEC
+hides its dependent controls. Hopping replaces the fixed center-frequency field
+with an ordered hop table and dwell time; hop rate is derived from dwell. Operation
+filters transmit/receive settings. Device type filters B205 serial versus X310
+address/channel controls. Device tuning and RF qualification remain separate.
+
+Each numeric control shows its applicable bounds and units. Non-finite values,
+out-of-range inputs and invalid integer multiples are rejected, never silently
+clamped. F5 also checks dependent constraints such as integral samples per symbol,
+modulation rate relationships, payload/frame limits, hop dwell/guard/airtime and
+network compatibility. Min/max limits are software admission rules; they cannot
+guarantee actual UHD coercion, streaming capacity or link performance. Use hardware
+preflight for device ranges/readbacks and the measured profiles for qualified RF.
+
+Saving validates the entire effective configuration and rebases file references
+to preserve their meaning. Missing keys can be represented offline; startup loads
+and validates them. A missing profile prevents opening a node. Source changes,
+read-only destinations and atomic-write failures leave the previous saved node
+usable. Immutable old profiles are retained. Never edit a shipped qualified
+profile in place to claim that its changed settings retain qualification.
+
+## Configuration schema 1
 
 Profiles are loaded at startup; both peers must be restarted with matching waveform
 settings. `schema_version: 1` is mandatory. Unversioned/legacy YAML and unknown

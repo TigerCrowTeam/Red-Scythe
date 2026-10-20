@@ -69,7 +69,8 @@ def run_probe(
     expected = {
         "modulation": config.sdr.modulation,
         "configured_bit_rate_bps": config.sdr.bit_rate_bps,
-        "configured_center_frequency_hz": config.center_frequency_hz,
+        # This gauge is the first scheduled frequency for both fixed and hopping profiles.
+        "configured_center_frequency_hz": config.frequency.frequencies_hz[0],
         "sample_rate_hz": config.sdr.sample_rate,
     }
     if not before.get("radio_ready") or any(before.get(k) != v for k, v in expected.items()):

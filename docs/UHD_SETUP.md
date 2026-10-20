@@ -1,8 +1,10 @@
 # Direct UHD setup and bench checks
 
-The hardware backend uses Ettus `uhd.usrp.MultiUSRP` directly. The target is one
-B205mini per workstation. B205 devices use UHD's `type=b200` selector. The initial
-verified host is Ubuntu 26.04.1, UHD 4.9.0.1-1ubuntu1, system Python 3.14.4 and USB 3.
+The hardware backend uses Ettus `uhd.usrp.MultiUSRP` directly. The current conducted
+reference is one X310 with two shared UBX-160 channels on one workstation. B205mini
+endpoints remain supported with the measured limitations in `MODULATION_RESULTS.md`;
+B205 uses `type=b200`, and X310 uses `type=x300`. The verified host is Ubuntu 26.04.1,
+UHD 4.9.0.1-1ubuntu1 and system Python 3.14.4.
 Other operating systems/UHD builds have not been qualified for this project.
 
 ## Python environment
@@ -25,6 +27,14 @@ mkdir -p ~/packet-radio-work
 cp -r "$VIRTUAL_ENV/share/packet-radio/configs" ~/packet-radio-work/
 cd ~/packet-radio-work
 packet-radio-validate configs/examples/peer-a-bpsk.yaml configs/examples/peer-b-bpsk.yaml
+```
+
+For the terminal editor, install the same wheel with its optional UI extra in
+this interpreter-matched environment:
+
+```bash
+python -m pip install "/path/to/packet_radio-1.1.0-py3-none-any.whl[ui]"
+packet-radio-ui
 ```
 
 Install matching FPGA/firmware images with the UHD image downloader if the driver

@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 from dataclasses import replace
+from typing import Any
 
 from packet_radio.app import run
 from packet_radio.config import load_config
@@ -39,8 +41,19 @@ def main() -> None:
         action="store_true",
         help="include bounded timing summaries in status snapshots",
     )
+    parser.add_argument("--ready-fd", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--run-id", help=argparse.SUPPRESS)
     args = parser.parse_args()
-    timing_options = {"timing_diagnostics": True} if args.timing_diagnostics else {}
+    timing_options: dict[str, Any] = {"timing_diagnostics": True} if args.timing_diagnostics else {}
+    if args.run_id is not None:
+        timing_options["run_id"] = args.run_id
+    if args.ready_fd is not None:
+
+        def ready():
+            os.write(args.ready_fd, b"R")
+            os.close(args.ready_fd)
+
+        timing_options["on_ready"] = ready
     try:
         config = load_config(args.config)
         if (

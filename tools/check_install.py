@@ -99,6 +99,7 @@ def main() -> None:
                 check=True,
                 stdout=subprocess.DEVNULL,
             )
+    subprocess.run([sys.executable, str(root / "tools/check_ui_install.py")], check=True)
     assert set(validate_fixture()) == {"data", "ack", "sync"}
     subprocess.run([sys.executable, str(root / "tools/fidelity_check.py")], check=True)
     with tempfile.TemporaryDirectory(prefix="packet-radio-install-") as temporary:

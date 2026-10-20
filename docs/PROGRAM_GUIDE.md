@@ -1,5 +1,10 @@
 # Packet Radio Program Guide
 
+This guide explains what Packet Radio does, how data moves through the program,
+and how its configuration, radio links, authentication and runtime components work.
+For explanations of the editable GUI fields, use the separate
+[Terminal GUI Guide](TERMINAL_GUI_GUIDE.md).
+
 ## Current scope
 
 Release **1.1.0** supports both reliable generic-v5 and ACK-free simple-frame 2FSK.
@@ -12,9 +17,10 @@ peer can send. A timing leader/follower setting coordinates the radio schedule;
 it does not change the meaning or priority of application data.
 
 The generic core, direct UHD backend and shared configuration interfaces are
-implemented. All five modulations passed local sustained, boundary-payload, echo and
-signal-recovery checks, with shorter GMSK/QPSK qualification; independent-host testing
-is deferred. See
+implemented. The shared-channel X310 is the reference for the documented conducted
+matrix. The final B205 comparison preserves its PSK delivery/recovery and QPSK RX
+overflow failures; older passing runs do not supersede those results. Independent-host
+testing remains deferred. See the hardware-specific
 [modulation results](../MODULATION_RESULTS.md) and [UHD setup](UHD_SETUP.md).
 
 ## Configuration
@@ -38,7 +44,8 @@ retain their separate responsibilities.
 
 See [configuration schema and migration](CONFIGURATION.md) for exact names, rate
 semantics, airtime admission and examples. Old unversioned YAML is rejected.
-Profiles are applied at startup; hopping and live changes remain future work.
+Profiles are applied at startup. Configured hopping is supported for simple 2FSK;
+changing a running configuration requires stopping and restarting both matching peers.
 
 ## Authentication setup
 

@@ -123,3 +123,46 @@ def test_cli_preserves_each_peers_status_without_overrides(monkeypatch):
     monkeypatch.setattr("sys.argv", ["packet-radio", "--config", "a", "--peer-config", "b"])
     cli.main()
     assert [c.status for c in run.call_args.args[0]] == [a.status, b.status]
+
+
+def test_shared_ready_waits_for_both_status_services(monkeypatch):
+    from packet_radio import app as application
+
+    owner = SimpleNamespace(radios=[object(), object()], close=Mock())
+    monkeypatch.setattr(shared, "SharedRadios", lambda _: owner)
+    ready_nodes = []
+    observed = []
+
+    class App:
+        def __init__(self, config, **kwargs):
+            self.node = config.node_id
+            self.stopped = threading.Event()
+            self.statistics = SimpleNamespace(snapshot=lambda: {"shutdown_errors": 0})
+
+        def run(self, *, on_ready):
+            ready_nodes.append(self.node)
+            on_ready()
+            assert self.stopped.wait(2)
+
+        def stop(self):
+            self.stopped.set()
+
+        def close(self):
+            pass
+
+    instances = []
+
+    def factory(*args, **kwargs):
+        app = App(*args, **kwargs)
+        instances.append(app)
+        return app
+
+    def ready():
+        observed.append(set(ready_nodes))
+        for app in instances:
+            app.stop()
+
+    monkeypatch.setattr(application, "RadioApp", factory)
+    shared.run_pair(configs(), on_ready=ready)
+    assert observed == [{1, 2}]
+    owner.close.assert_called_once()

@@ -32,15 +32,23 @@ def status(config):
         "radio_ready": True,
         "modulation": config.sdr.modulation,
         "configured_bit_rate_bps": config.sdr.bit_rate_bps,
-        "configured_center_frequency_hz": config.center_frequency_hz,
+        "configured_center_frequency_hz": config.frequency.frequencies_hz[0],
         "sample_rate_hz": config.sdr.sample_rate,
     }
 
 
 @pytest.mark.parametrize("modes", [("traffic", "traffic"), ("echo", "reflector")])
-def test_two_coordinated_probes_exchange_exact_payloads(monkeypatch, modes):
+@pytest.mark.parametrize("hopping", [False, True])
+def test_two_coordinated_probes_exchange_exact_payloads(monkeypatch, modes, hopping):
     ports = free_ports()
-    configs = [load_config(f"configs/examples/peer-{p}-bpsk.yaml") for p in "ab"]
+    configs = [
+        load_config(
+            f"configs/v1_1/peer-{p}-hopping.yaml"
+            if hopping
+            else f"configs/examples/peer-{p}-bpsk.yaml"
+        )
+        for p in "ab"
+    ]
     configs = [
         replace(c, endpoint=replace(c.endpoint, bind_port=ports[1 - i], destination_port=ports[i]))
         for i, c in enumerate(configs)
@@ -169,7 +177,12 @@ def test_profile_mismatch_fails_before_udp(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "path", ["configs/examples/peer-a-bpsk.yaml", "configs/v1_1/peer-a-simple.yaml"]
+    "path",
+    [
+        "configs/examples/peer-a-bpsk.yaml",
+        "configs/v1_1/peer-a-simple.yaml",
+        "configs/v1_1/peer-a-hopping.yaml",
+    ],
 )
 def test_probe_accepts_actual_application_processing_snapshot(monkeypatch, path):
     from packet_radio.app import RadioApp
@@ -214,3 +227,24 @@ def test_processing_mismatch_fails_before_udp(monkeypatch):
     monkeypatch.setattr(probe.socket, "socket", unexpected)
     with pytest.raises(ValueError, match="effective configuration"):
         probe.run_probe(c, run_id="mismatch", start_at=time.time() + 5, duration=1, rate=1, size=64)
+
+
+def test_changed_hop_table_rejected_even_with_same_initial_frequency(monkeypatch):
+    config = load_config("configs/v1_1/peer-a-hopping.yaml")
+    frequencies = config.frequency.frequencies_hz
+    other = replace(
+        config,
+        frequency=replace(
+            config.frequency, frequencies_hz=(frequencies[0], *reversed(frequencies[1:]))
+        ),
+    )
+    monkeypatch.setattr(probe, "fetch_status", lambda url: status(other))
+
+    def unexpected(*args):
+        pytest.fail("mismatched hop table opened UDP")
+
+    monkeypatch.setattr(probe.socket, "socket", unexpected)
+    with pytest.raises(ValueError, match="effective configuration"):
+        probe.run_probe(
+            config, run_id="wrong-hops", start_at=time.time() + 5, duration=1, rate=1, size=64
+        )

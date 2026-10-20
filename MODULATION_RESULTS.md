@@ -3174,3 +3174,201 @@ counters, recovery outcomes, shutdown results and whitespace were checked.
 The existing plan and UHD guide now reflect the completed comparison. Temporary
 JSON, logs, generated node overlays and benchmark scripts were removed after
 retaining these summaries. All radio/benchmark processes were closed.
+
+
+## Terminal interface X310 qualification (2026-10-20)
+
+**Disposition: terminal interface accepted for the conducted X310 scope below.**
+All five generic modulations, custom simple 2FSK and phase-coordinated hopping
+passed matching CLI and terminal-UI workloads. This completes Step 9 of the
+terminal-interface plan. Arbitrary arrival timing in the existing ACK-free
+hopping mode retains the explicit boundary-drop behavior documented below.
+
+### Setup and matching
+
+X310 `3267DE0` at `192.168.10.2`, two UBX-160 channels, each TX/RX crossed through
+30 dB attenuation into the other channel's RX2. Both channels used 2 Msps,
+TX/RX gains 0 dB, and 915 MHz for fixed-frequency traffic. UHD 4.9.0.1,
+Python 3.14.4, NumPy 2.5.4 and Textual 8.2.8. UBX read back its fixed 160 MHz
+analog bandwidth for the requested 1 MHz; no host/NIC/socket-buffer tuning changed.
+
+Generic modes used `generic-*-unslotted-v5` definitions and the X310 node settings,
+with temporary signed identities and persisted replay state shared by each matched
+CLI/UI pair. QPSK used the existing 500 kbit/s, 256-packet host batching node;
+the other generic modes used 250 kbit/s and the existing default batching.
+Custom simple 2FSK used sync `d391d391` and CRC32-ISO-HDLC, retaining the 32-byte
+`55` preamble, two-byte variable length, no FEC and 125 kHz deviation.
+Hopping used the existing X310 profile: 914/915/916 MHz, 2 hops/s, 100 ms guards
+and 10 ms timed TX lead. All compared effective-configuration hashes matched.
+
+Each mode ran headless CLI first and UI second, sequentially. The UI used its
+normal terminal driver in a 120×45 pseudoterminal, with automated keyboard/dialog
+input and F12 visible throughout traffic; this was not Textual's headless test
+driver. UDP probes ran in separate processes in both controls. Earlier exploratory
+BPSK/2FSK probes shared the UI process and were excluded from this comparison
+because rendering could delay probe timestamps. The corrected matched runs below
+retain the same payload sizes, rates, drain windows and acceptance gates.
+
+Each positive run offered ten seconds at 5 packets/s/direction, 256 bytes, then
+a separate ten-second 5-probe/s echo/reflector workload. Each phase had a
+five-second drain. Every one of the 14 runs delivered **50/50 exact packets in
+each direction and 50/50 exact echoes**, with no duplicate/unexpected payloads.
+The unchanged echo gate was p95 ≤1 second. No new stream errors, transmit drops,
+queue drops/expiry, retries or retry exhaustion occurred in these positive windows;
+all final payload and ACK queues were empty. Every radio and terminal process
+exited 0. No software tests competed for CPU during RF measurements.
+
+### Matched results
+
+| Mode | CLI echo p95 (ms) | UI echo p95 (ms) | Shared radio CPU, CLI / UI (s) | UI process CPU (s) |
+|---|---:|---:|---:|---:|
+| BPSK, 250 kbit/s | 141.500 | 121.705 | 21.930 / 22.630 | 3.007 |
+| 2FSK, 250 kbit/s | 115.085 | 116.291 | 16.920 / 18.060 | 3.081 |
+| MSK, 250 kbit/s | 114.389 | 116.769 | 17.860 / 18.360 | 3.122 |
+| GMSK, 250 kbit/s | 117.782 | 119.635 | 17.870 / 18.260 | 3.203 |
+| QPSK, 500 kbit/s | 149.361 | 141.642 | 18.480 / 19.000 | 2.925 |
+| Custom simple 2FSK, 250 kbit/s | 57.322 | 58.729 | 14.530 / 15.730 | 3.000 |
+| Hopping simple 2FSK, 250 kbit/s | 257.006 | 255.154 | 14.800 / 15.470 | 3.560 |
+
+CPU includes the offered-load, coordinated-start and drain window: approximately
+33.06 seconds for fixed cases and 34 seconds for hopping. Shared-radio CPU is
+counted once for both channels. UI-process CPU includes rendering and automation;
+probe CPU is separate. The UI added about 3–3.6 CPU seconds in these windows.
+The largest observed UI echo-p95 increase was 2.380 ms (MSK). No comparison
+crossed the investigation threshold of an increase greater than both 20 ms and
+20% of its matching CLI p95. These are short acceptance runs at the stated loads.
+
+Every UI run produced 67–68 matching live snapshot observations without stale
+status. At this sampling rate, at most one queued payload and one pending ACK
+were observed; final queues were empty. Hopping status showed all three active
+frequencies on both channels, changing delivery counters and RF/payload activity.
+
+### Hopping boundary behavior and diagnostics
+
+An unaligned headless echo attempt delivered **40/50**, with ten selected bursts
+dropped at node A before RF submission. Its normal traffic still delivered 50/50
+both ways. This failed exact delivery despite a passing 193.719 ms echo p95 and
+zero stream errors. The cause was the existing whole-burst admission contract,
+not the UI: a selected burst that cannot finish before the trailing guard is
+counted as `hop_burst_rejections`/`transmit_drops` and is not retried on another hop.
+
+The positive hopping comparison kept the same 5 packets/s, 256 bytes, duration
+and gates. Both traffic and echo start times were coordinated to 25 ms after a
+500 ms dwell boundary, allowing each selected burst its full airtime and timed
+lead before the trailing guard. No guard, lead, queue or on-air behavior changed.
+It passed all 50-packet gates. Both controls had one initial tune-deadline count
+per node from startup during a dwell; neither accumulated further tune-deadline
+misses or missed slots during measured traffic.
+
+A separate UI boundary test started 90 ms after a dwell boundary and offered
+five packets each way at the same rate. Each node rejected exactly one selected
+burst: **4/5 delivered, one admission rejection and one TX drop per node**, as
+expected for this negative test. F12 displayed those counts and the hop-window
+explanation while the radio remained operational. The UI now also displays hop
+slot/count, retune duration and missed-slot/tune-deadline counters for hopping
+profiles. Unsynchronized application arrivals are not qualified for lossless
+hopping by these results.
+
+The existing UDP probe originally rejected hopping before sending because it read
+the fixed-only center-frequency property. It now compares the status gauge against
+the first scheduled frequency and still checks the entire effective configuration.
+Tests cover actual hopping snapshots, exact traffic/echo over loopback and rejection
+of a changed hop table sharing the same first frequency. This changes the test
+adapter, not radio framing, admission or synchronization.
+
+### Lifecycle, verification and retained artifacts
+
+Every UI case reopened saved settings, launched a shared pair, displayed live
+status, stopped and quit. The custom-framing case then edited both nodes from
+915 to 916 MHz in the editor, saved/reopened them and restarted with a new run ID.
+Both hardware readbacks showed 916 MHz; five fresh payloads in each direction
+arrived exactly, followed by a clean Ctrl+C stop. Source profile qualification
+labels were not broadened; edited combinations remain custom outside this scope.
+
+The Step 8 full-suite baseline remains 1,809 passes and 89.55% coverage. After the
+probe correction and conditional hopping display, all 37 affected probe, monitor
+and run-UI checks passed on Python 3.10.21 and 3.14.4; lint, formatting and type
+checks passed. No B205, independent-host, calibrated RF-mask or commercial-radio
+interoperability qualification is implied. Final summaries are retained here;
+temporary reports, signed keys, replay state, terminal capture and generated node
+files are removed after closeout. Release archives are refreshed with the final
+interface, diagnostics, guides and this summary.
+
+
+## X310 experimental hop-rate ceiling — 2026-10-20
+
+**Outcome: 3.5 hops/s was the highest tested rate to pass every check, including
+three independently opened 60-second runs.** Rates of 3.55 and above failed this
+workload. This measures the present software/configuration envelope, not the
+X310's absolute hardware maximum. The normal GUI/profile limit remains 2 hops/s;
+these measurements do not automatically qualify arbitrary user configurations.
+
+Setup: detected X310 serial 3267DE0 at 192.168.10.2, shared UBX-160 channels 0/1,
+UHD 4.9.0.1, same host, existing crossed attenuated RF paths. Retained the X310
+hopping profile's 914/915/916 MHz cycle, 250 kbit/s 2FSK, 2 Msps, 0 dB gains,
+100 ms post-tune/trailing guards and 10 ms timed TX lead. No NIC/kernel/FPGA or
+production timing changes. UHD again reported its existing 1 MiB send-buffer
+limit; the passing runs recorded no stream errors.
+
+`tools/hopping_check.py --experimental-rate` overrides only the in-memory dwell
+after normal application initialization; it does not relax saved-profile
+validation. Both directions queue one unique 1024-byte payload at 100 ms into each
+dwell. Production readiness and whole-burst admission determine actual transmit
+timing. This early-queued maximum-packet workload differs from the historical
+256-byte workload injected at 200/300 ms. Following the steady phase, checks cover
+1/64/1024-byte payloads, deliberately late maximum packets, a three-dwell
+interruption and recovery, frequency/whole-burst timestamp bounds, and shutdown.
+Each steady payload must arrive exactly and within its intended dwell.
+
+| Rate (hops/s) | Dwell (ms) | Short-screen steady RX channel 0 / channel 1 | Result |
+|---|---:|---|---|
+| 2 | 500.000 | 24/24 / 24/24 | All checks passed |
+| 3 | 333.333 | 36/36 / 36/36 | All checks passed |
+| 3.5 | 285.714 | 42/42 / 42/42 | All checks passed; repeated below |
+| 3.55 | 281.690 | 43/43 / 43/43 | Failed subsequent mixed-size boundary delivery |
+| 3.6 | 277.778 | 43/44 / 44/44 | One steady burst rejected on TX channel 1 |
+| 3.7 | 270.270 | 20/45 / 25/45 | 20/25 steady burst rejections on TX channels 0/1 |
+| 4 | 250.000 | 0/48 / 0/48 | All maximum-size steady bursts rejected |
+
+Short screens requested 12 seconds, rounded up to whole dwells. Failed screens
+are not credited with passing the later recovery/boundary gates. An initial
+2-hop/s early-queue run passed steady/boundary delivery but exposed the probe's
+recovery timing assumption: the interrupted receiver resumes 20 ms into a dwell.
+The experimental recovery packets now wait until 160 ms to allow its full
+retune/settle period; the completed screens and repeats use this correction.
+
+| 3.5 hops/s run | Steady exact RX per direction | Total exact RX per direction | Deliberate late rejections per channel | Stream errors / missed steady hops / missed tune deadlines |
+|---|---|---|---|---|
+| 60 seconds, reopen 1 | 210/210 | 234/234 | 21 | 0 / 0 / 0 |
+| 60 seconds, reopen 2 | 210/210 | 234/234 | 21 | 0 / 0 / 0 |
+| 60 seconds, reopen 3 | 210/210 | 234/234 | 21 | 0 / 0 / 0 |
+
+Across repeats: 702/702 total exact packets per direction, including 630/630
+maximum-size steady packets; recovery succeeded in the first resumed dwell;
+all transmitted bursts passed timestamp/frequency guard checks and every close
+was clean. The intentional interruption accounts for three skipped slots on
+channel 1 per run, outside the steady interval. No ACKs or retries were used.
+Worst observed total tune was 24.331 ms, decoder-ready phase 128.751 ms, and
+host/device clock-mapping bracket 1.306 ms. These are finite-run observations,
+not guaranteed worst-case bounds or independently measured RF edges.
+
+The earlier 3.64 hops/s estimate was a timing-budget estimate without extra
+scheduling margin. At 3.5 hops/s the usable window can accommodate this workload;
+nearer the estimate, modulation/host scheduling variation consumes the remaining
+margin and admission rejects packets. Treat 3.5 as the highest passing tested
+point, not an exact universal threshold. Other payload sizes, bit rates,
+modulations, hop tables, guards, loads and hosts need separate measurements.
+Faster operation requires a separate investigation of smaller guards, timed
+retuning or digital frequency shifts; this sweep did not test those designs.
+
+Reproduce a repeated-run workload from the repository root (each invocation
+opens and closes the device):
+
+```bash
+PYTHONPATH=. .venv-uhd/bin/python tools/hopping_check.py \
+  --shared-address 192.168.10.2 --experimental-rate 3.5 --seconds 60
+```
+
+Hopping, scheduler and configuration regression checks: **134 passed**. Tool/test
+lint and formatting checks also passed. Only this final summary is retained;
+temporary per-run logs are removed.

@@ -32,6 +32,7 @@ from packet_radio.protocol.authentication import (
 from packet_radio.protocol.interfaces import QueuedPacket
 from packet_radio.protocol.registry import ProcessingProfile, resolve_processing
 from packet_radio.recording import CaptureRecorder
+from packet_radio.runtime.identity import runtime_identity
 from packet_radio.scheduler import FrequencyScheduler
 from packet_radio.statistics import LinkStatistics
 from packet_radio.status import StatusService
@@ -59,6 +60,7 @@ class RadioApp:
         wall_clock=time.time,
         monotonic_clock=time.monotonic,
         timing_diagnostics: bool = False,
+        run_id: str | None = None,
     ):
         self.status_service: StatusService | None = None
         self.recorder: CaptureRecorder | None = None
@@ -73,6 +75,7 @@ class RadioApp:
                 monotonic_clock=monotonic_clock,
                 timing_diagnostics=timing_diagnostics,
             )
+            self.statistics.set_runtime_identity(runtime_identity(config, run_id))
             self.statistics.set_gauge("radio_ready", True)
         except BaseException:
             self.close()
@@ -319,6 +322,10 @@ class RadioApp:
                 if finished.slot != state.slot or phase > self.config.frequency.guard_seconds:
                     self.statistics.increment("hop_tune_deadlines_missed")
                 self._prepared_burst = None
+            backend = getattr(self.sdr, "radio", self.sdr)
+            actual = getattr(backend, "actual_settings", {})
+            if isinstance(actual, dict):
+                self.statistics.set_hardware_readback(actual)
             self.current_frequency = wanted
             self.statistics.set_gauge("active_frequency_hz", wanted)
             if previous is not None:
@@ -395,7 +402,7 @@ class RadioApp:
             if self.status_service is not None:
                 self.status_service.maybe_report()
 
-    def run(self) -> None:
+    def run(self, *, on_ready=None) -> None:
         LOG.info("starting %s node %d", self.config.timing_role, self.config.node_id)
         try:
             self.status_service = StatusService(
@@ -406,6 +413,8 @@ class RadioApp:
                 self.monotonic_clock,
             )
             self.status_service.start()
+            if on_ready is not None:
+                on_ready()
             while self.running.is_set():
                 self.step()
         finally:
@@ -437,8 +446,14 @@ class RadioApp:
         self.running.clear()
 
 
-def run(config: RadioConfig, *, timing_diagnostics: bool = False) -> None:
-    app = RadioApp(config, timing_diagnostics=timing_diagnostics)
+def run(
+    config: RadioConfig, *, timing_diagnostics: bool = False, on_ready=None, run_id=None
+) -> None:
+    app = RadioApp(
+        config,
+        timing_diagnostics=timing_diagnostics,
+        **({"run_id": run_id} if run_id is not None else {}),
+    )
     signal.signal(signal.SIGINT, app.stop)
     signal.signal(signal.SIGTERM, app.stop)
-    app.run()
+    app.run(**({"on_ready": on_ready} if on_ready is not None else {}))

@@ -268,3 +268,45 @@ def test_timing_diagnostics_flag_reaches_single_and_shared_launch(monkeypatch, p
         options += ["--peer-config", "configs/v1_1/peer-b-x310-simple.yaml"]
     invoke(monkeypatch, radio_cli, *options)
     assert run.call_args.kwargs == {"timing_diagnostics": True}
+
+
+@pytest.mark.parametrize("paired", [False, True])
+def test_owned_readiness_pipe_uses_actual_start_callback(monkeypatch, paired):
+    import os
+
+    from packet_radio.hardware import shared
+
+    read_fd, write_fd = os.pipe()
+    try:
+
+        def started(config, **kwargs):
+            kwargs["on_ready"]()
+
+        monkeypatch.setattr(
+            shared if paired else radio_cli, "run_pair" if paired else "run", started
+        )
+        options = ["--config", "configs/v1_1/peer-a-simple.yaml", "--ready-fd", str(write_fd)]
+        if paired:
+            options += ["--peer-config", "configs/v1_1/peer-b-simple.yaml"]
+        invoke(monkeypatch, radio_cli, *options)
+        assert os.read(read_fd, 2) == b"R"
+        assert os.read(read_fd, 1) == b""
+    finally:
+        os.close(read_fd)
+        try:
+            os.close(write_fd)
+        except OSError:
+            pass
+
+
+@pytest.mark.parametrize("paired", [False, True])
+def test_owned_run_identity_reaches_single_and_shared_launch(monkeypatch, paired):
+    from packet_radio.hardware import shared
+
+    run = Mock()
+    monkeypatch.setattr(shared if paired else radio_cli, "run_pair" if paired else "run", run)
+    options = ["--config", "configs/v1_1/peer-a-simple.yaml", "--run-id", "owned-session"]
+    if paired:
+        options += ["--peer-config", "configs/v1_1/peer-b-simple.yaml"]
+    invoke(monkeypatch, radio_cli, *options)
+    assert run.call_args.kwargs == {"run_id": "owned-session"}

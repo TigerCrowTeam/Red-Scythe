@@ -11,6 +11,7 @@ requires-python = ">=3.10"
 dependencies = ["cryptography>=42", "numpy>=1.23", "PyYAML>=6.0", "reedsolo>=1.7"]
 
 [project.optional-dependencies]
+ui = ["textual>=8.2.8,<8.3"]
 test = ["pytest>=7"]
 dev = [
     "build>=1.2",
@@ -31,6 +32,7 @@ packet-radio-validate = "packet_radio.cli.validate:main"
 packet-radio-replay = "packet_radio.cli.replay:main"
 packet-radio-keys = "packet_radio.cli.key_cli:main"
 packet-radio-conformance = "packet_radio.cli.conformance:main"
+packet-radio-ui = "packet_radio.cli.ui:main"
 
 [tool.setuptools.packages.find]
 include = ["packet_radio*"]

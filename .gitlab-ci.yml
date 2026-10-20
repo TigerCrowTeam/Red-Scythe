@@ -32,7 +32,7 @@ test:
       - PYTHON_VERSION: ["3.10", "3.11", "3.12", "3.13", "3.14"]
   image: "python:${PYTHON_VERSION}"
   before_script:
-    - python -m pip install -e ".[dev]"
+    - python -m pip install -e ".[dev,ui]"
   script:
     - pytest --cov=packet_radio --cov-report=term-missing --cov-report=xml
   coverage: '/TOTAL.*\s+(\d+%)$/'
@@ -42,6 +42,17 @@ test:
       coverage_report:
         coverage_format: cobertura
         path: coverage.xml
+
+ui-dependency:
+  stage: test
+  parallel:
+    matrix:
+      - PYTHON_VERSION: ["3.10", "3.14"]
+  image: "python:${PYTHON_VERSION}"
+  before_script:
+    - python -m pip install -e ".[ui,test]"
+  script:
+    - pytest -q tests/configuration tests/tui tests/runtime
 
 dependency-audit:
   stage: security
@@ -62,8 +73,11 @@ package:
     - python -m pip install --force-reinstall --no-deps dist/packet_radio-1.1.0-py3-none-any.whl
     - python -m venv /tmp/packet-radio-release
     - /tmp/packet-radio-release/bin/python -m pip install --force-reinstall dist/packet_radio-1.1.0-py3-none-any.whl
+    - cp dist/packet_radio-1.1.0-py3-none-any.whl /tmp/packet_radio-1.1.0-py3-none-any.whl
     - cd /tmp
     - /tmp/packet-radio-release/bin/python /tmp/packet-radio-release/share/packet-radio/tools/check_install.py
+    - /tmp/packet-radio-release/bin/python -m pip install "/tmp/packet_radio-1.1.0-py3-none-any.whl[ui]"
+    - /tmp/packet-radio-release/bin/python /tmp/packet-radio-release/share/packet-radio/tools/check_ui_install.py
   artifacts:
     paths:
       - dist/
