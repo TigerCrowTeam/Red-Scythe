@@ -23,13 +23,14 @@ from typing import Any, Callable
 
 import numpy as np
 
-from packet_radio.config import SDRConfig, _check_types
+from packet_radio.config import SDRConfig, _check_types, config_from_snapshot
 from packet_radio.modems.fec import INTERLEAVER_DEPTH
-from packet_radio.modems.registry import make_modem, waveform
 from packet_radio.modems.registry import samples_per_symbol as derive_sps
-from packet_radio.protocol.framing import PROTOCOL_VERSION, RadioPacket, has_valid_crc
+from packet_radio.modems.registry import waveform
+from packet_radio.protocol.framing import PROTOCOL_VERSION
+from packet_radio.protocol.registry import ProcessingProfile, processing_profile, resolve_processing
 
-CAPTURE_FORMAT_VERSION = 2
+CAPTURE_FORMAT_VERSION = 3
 IQ_DTYPE = np.dtype("<c8")
 LOG = logging.getLogger(__name__)
 
@@ -42,6 +43,7 @@ class CaptureRecorder:
         directory: str | Path,
         *,
         sample_rate: float,
+        resolved_configuration: dict | None = None,
         center_frequency_hz: float | None = None,
         samples_per_symbol: int,
         rrc_rolloff: float = 0.0,
@@ -85,7 +87,7 @@ class CaptureRecorder:
         self.record_frames_enabled = record_frames
         self._started_ns = time.time_ns()
         manifest = {
-            "capture_format_version": CAPTURE_FORMAT_VERSION,
+            "capture_format_version": 2,
             "protocol_version": PROTOCOL_VERSION,
             "configuration_schema_version": 1,
             "packet_format": "generic-v5",
@@ -108,6 +110,29 @@ class CaptureRecorder:
         }
         if modulation == "gmsk" or gaussian_bt is not None or gaussian_span_symbols is not None:
             manifest.update(gaussian_bt=gaussian_bt, gaussian_span_symbols=gaussian_span_symbols)
+        if resolved_configuration is not None:
+            from packet_radio.profiles import profile_fingerprint
+
+            resolved = config_from_snapshot(resolved_configuration)
+            selected = resolve_processing(resolved)
+            manifest.update(
+                capture_format_version=CAPTURE_FORMAT_VERSION,
+                resolved_configuration=resolved_configuration,
+                configuration_sha256=profile_fingerprint(resolved_configuration),
+                processing=selected.describe(),
+                tx_idle_samples=selected.tx_idle_samples(resolved.sdr),
+                configuration_schema_version=resolved.schema_version,
+                packet_format=selected.name,
+                protocol_version=PROTOCOL_VERSION if selected.name == "generic-v5" else None,
+                burst_format=definition.burst_format
+                if selected.name == "generic-v5"
+                else "simple-frame-v1",
+                fec_scheme=(
+                    resolved.emulation["protection"]["scheme"]
+                    if resolved.emulation
+                    else "extended-hamming-8-4"
+                ),
+            )
         _manifest_modem(manifest)
         if create_session:
             manifest["session_started_unix_ns"] = self._started_ns
@@ -221,10 +246,13 @@ def load_manifest(directory: str | Path) -> dict[str, Any]:
     if (
         not isinstance(manifest, dict)
         or type(manifest.get("capture_format_version")) is not int
-        or manifest["capture_format_version"] not in (1, CAPTURE_FORMAT_VERSION)
+        or manifest["capture_format_version"] not in (1, 2, CAPTURE_FORMAT_VERSION)
     ):
         raise ValueError("unsupported capture format version")
-    if manifest.get("protocol_version") != PROTOCOL_VERSION:
+    if (
+        manifest["capture_format_version"] != 3
+        and manifest.get("protocol_version") != PROTOCOL_VERSION
+    ):
         raise ValueError("unsupported capture protocol version")
     _manifest_modem(manifest)
     return manifest
@@ -232,6 +260,9 @@ def load_manifest(directory: str | Path) -> dict[str, Any]:
 
 def _manifest_modem(manifest: dict[str, Any]):
     try:
+        if manifest.get("capture_format_version") == 3:
+            config = _resolved_manifest_config(manifest)
+            return resolve_processing(config).make_modem(config.sdr, clock=lambda: 0.0)
         if manifest.get("iq_dtype") != IQ_DTYPE.str:
             raise ValueError("unsupported capture IQ dtype")
         modulation = manifest.get("modulation", "bpsk")
@@ -282,12 +313,14 @@ def _manifest_modem(manifest: dict[str, Any]):
             rs_parity_bytes=manifest.get("rs_parity_bytes", 0),
         )
         _check_types(config)
-        return make_modem(config, candidate_validator=has_valid_crc)
+        return processing_profile(manifest.get("packet_format", "generic-v5")).make_modem(config)
     except (KeyError, TypeError, ZeroDivisionError) as exc:
         raise ValueError(f"invalid capture waveform: {exc}") from exc
 
 
 def replay_iq(directory: str | Path, chunk_samples: int = 4096) -> Iterator[bytes]:
+    if type(chunk_samples) is not int or chunk_samples <= 0:
+        raise ValueError("chunk_samples must be a positive integer")
     manifest = load_manifest(directory)
     modem = _manifest_modem(manifest)
     try:
@@ -328,13 +361,25 @@ def replay_frames(directory: str | Path) -> Iterator[bytes]:
 
 
 def describe_frames(
-    wires: Iterable[bytes], verification_keys: dict[int, Any] | None = None
+    wires: Iterable[bytes],
+    verification_keys: dict[int, Any] | None = None,
+    *,
+    processing: ProcessingProfile | None = None,
 ) -> Iterator[dict[str, Any]]:
+    selected = processing or processing_profile("generic-v5")
     for index, wire in enumerate(wires):
         try:
-            packet = RadioPacket.decode(wire, verification_keys)
+            packet = selected.codec.decode(wire, verification_keys)
         except ValueError as exc:
             yield {"index": index, "valid": False, "error": str(exc)}
+            continue
+        if selected.name == "simple-frame-v1":
+            yield {
+                "index": index,
+                "valid": True,
+                "packet_format": selected.name,
+                "payload_base64": base64.b64encode(packet).decode("ascii"),
+            }
             continue
         yield {
             "index": index,
@@ -346,3 +391,62 @@ def describe_frames(
             "session_id": packet.session_id,
             "payload_base64": base64.b64encode(packet.payload).decode("ascii"),
         }
+
+
+def _resolved_manifest_config(manifest: dict):
+    """Reject conflicting metadata rather than replaying with guessed defaults."""
+    from packet_radio.profiles import profile_fingerprint
+
+    raw = manifest.get("resolved_configuration")
+    if not isinstance(raw, dict):
+        raise ValueError("capture requires resolved_configuration")
+    config = config_from_snapshot(raw)
+    processing = resolve_processing(config)
+    if manifest.get("configuration_sha256") != profile_fingerprint(raw):
+        raise ValueError("capture resolved configuration checksum differs")
+    sdr = config.sdr
+    expected = {
+        "iq_dtype": IQ_DTYPE.str,
+        "processing": processing.describe(),
+        "tx_idle_samples": processing.tx_idle_samples(sdr),
+        "configuration_schema_version": config.schema_version,
+        "packet_format": config.packet_format,
+        "protocol_version": PROTOCOL_VERSION if config.packet_format == "generic-v5" else None,
+        "burst_format": waveform(sdr.modulation).burst_format
+        if config.packet_format == "generic-v5"
+        else "simple-frame-v1",
+        "authenticated": config.authentication.private_key_file is not None,
+        "center_frequency_hz": config.frequency.frequencies_hz[0],
+        "sample_rate": sdr.sample_rate,
+        "samples_per_symbol": sdr.samples_per_symbol,
+        "bit_rate_bps": sdr.bit_rate_bps,
+        "symbol_rate_baud": sdr.symbol_rate_baud,
+        "modulation": sdr.modulation,
+        "frequency_deviation_hz": sdr.frequency_deviation_hz,
+        "rrc_rolloff": sdr.rrc_rolloff,
+        "rrc_span_symbols": sdr.rrc_span_symbols,
+        "interleaver_depth": sdr.fec_interleaver_depth,
+        "bit_repetitions": sdr.bit_repetitions,
+        "rs_parity_bytes": sdr.rs_parity_bytes,
+        "fec_scheme": config.emulation["protection"]["scheme"]
+        if config.emulation
+        else "extended-hamming-8-4",
+    }
+    if sdr.modulation == "gmsk":
+        expected.update(
+            gaussian_bt=sdr.gaussian_bt, gaussian_span_symbols=sdr.gaussian_span_symbols
+        )
+    for key, value in expected.items():
+        if (
+            key not in manifest
+            or manifest[key] != value
+            or (type(value) in (bool, int) and type(manifest[key]) is not type(value))
+        ):
+            raise ValueError(f"capture {key} disagrees with resolved configuration")
+    return config
+
+
+def manifest_processing(manifest: dict) -> ProcessingProfile:
+    if manifest.get("capture_format_version") == 3:
+        return resolve_processing(_resolved_manifest_config(manifest))
+    return processing_profile("generic-v5")

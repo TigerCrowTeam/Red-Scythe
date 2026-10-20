@@ -1,0 +1,43 @@
+profile_version: 1
+id: simple-2fsk-v1
+revision: 1
+reference: docs/EMULATION_PROFILE.md revision 1
+qualification: short-conducted
+limitations:
+- Project-defined profile; no commercial-radio interoperability claim.
+- Single-host attenuated B205mini checks; no independent-host qualification.
+- Fixed frequency; sustained simple-format qualification remains pending.
+waveform:
+  modulation: 2fsk
+  sample_rate_hz: 2000000
+  bandwidth_hz: 1000000
+  bit_rate_bps: 250000
+  frequency_deviation_hz: 125000
+frequency:
+  mode: fixed
+  center_frequency_hz: 915000000
+packet:
+  format: simple-frame-v1
+  max_payload_bytes: 1024
+  frame:
+    preamble: '55'
+    preamble_repetitions: 32
+    sync: a7c35a9e
+    bit_order: big
+    length_bytes: 2
+    length_byte_order: big
+    fixed_payload_bytes: null
+    crc: crc16-ccitt-false
+    crc_byte_order: big
+    whitening: none
+    differential: false
+protection:
+  scheme: none
+  interleaver_depth: 16
+  bit_repetitions: 1
+  rs_parity_bytes: 0
+link:
+  mode: ack-free
+  minimum_gap_seconds: 0.002
+  minimum_interval_seconds: 0.0
+  turnaround_seconds: 0.002

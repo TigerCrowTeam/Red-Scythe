@@ -1,7 +1,8 @@
-"""Local two-USRP UDP characterization, requiring the attenuated bench profiles.
+"""Conducted UDP characterization for two USRPs or two channels of one X310.
 
-This actively transmits. It uses separate application processes, temporary signed
-identities and real localhost UDP endpoints. It is not two-host release acceptance.
+This actively transmits. Separate devices use separate processes; --shared-device
+uses one process with a shared owner and clock. Both modes use temporary signed
+identities and real localhost UDP endpoints, not two-host release acceptance.
 """
 
 import argparse
@@ -13,6 +14,7 @@ import platform
 import socket
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -23,6 +25,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from packet_radio.app import RadioApp
 from packet_radio.config import load_config, validate_network
+from packet_radio.hardware.shared import SharedRadios
 from packet_radio.protocol.framing import PacketKind
 
 
@@ -97,10 +100,13 @@ def correlate_tiny_payloads(sent, transmitted, delivered, udp):
     return received, latencies, duplicates, changed
 
 
-def worker(config, pipe, audit_packets=False):
+def worker(config, pipe, audit_packets=False, sdr=None, timing_diagnostics=False, stop_event=None):
     app = None
     try:
-        app = RadioApp(config)
+        options = {"timing_diagnostics": True} if timing_diagnostics else {}
+        if sdr is not None:
+            options["sdr"] = sdr
+        app = RadioApp(config, **options)
         audit = install_packet_audit(app) if audit_packets else None
         muted = [False]
 
@@ -125,7 +131,7 @@ def worker(config, pipe, audit_packets=False):
                 },
             )
         )
-        while True:
+        while stop_event is None or not stop_event.is_set():
             if pipe.poll():
                 command = pipe.recv()
                 if command == "stop":
@@ -159,11 +165,35 @@ def worker(config, pipe, audit_packets=False):
         pipe.close()
 
 
-def start(config, audit_packets=False):
+class ThreadPeer(threading.Thread):
+    """Process-shaped handle; a shared device must remain in one process."""
+
+    exitcode = 0
+
+    def __init__(self, **kwargs):
+        self.stop_event = threading.Event()
+        super().__init__(**kwargs, kwargs={"stop_event": self.stop_event})
+
+    def terminate(self):
+        self.stop_event.set()
+        self.join(5)
+        if self.is_alive():
+            raise RuntimeError("shared radio worker did not stop; device remains owned")
+
+
+def start(config, audit_packets=False, sdr=None, timing_diagnostics=False):
     parent, child = mp.get_context("spawn").Pipe()
-    process = mp.get_context("spawn").Process(target=worker, args=(config, child, audit_packets))
+    if sdr is None:
+        process = mp.get_context("spawn").Process(
+            target=worker, args=(config, child, audit_packets, None, timing_diagnostics)
+        )
+    else:
+        process = ThreadPeer(
+            target=worker, args=(config, child, audit_packets, sdr, timing_diagnostics), daemon=True
+        )
     process.start()
-    child.close()
+    if sdr is None:
+        child.close()
     if not parent.poll(30):
         process.terminate()
         process.join(3)
@@ -200,9 +230,31 @@ def request(peer, command):
     return value
 
 
+def post_workload_stream_errors(after, shutdown):
+    """Keep transport failures during interruption/recovery out of the success count."""
+    keys = (
+        "rx_overflows",
+        "rx_buffer_drops",
+        "rx_stream_errors",
+        "decoder_output_drops",
+        "tx_timeouts",
+        "tx_underflows",
+        "tx_stream_errors",
+        "timed_transmit_late",
+        "transmit_errors",
+        "transmit_drops",
+        "shutdown_errors",
+    )
+    return [
+        {k: end[k] - start[k] for k in keys if end[k] != start[k]}
+        for start, end in zip(after, shutdown)
+    ]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--duration", type=float, default=60)
+    parser.add_argument("--shared-device", action="store_true", help="use two profiles on one X310")
     profiles = parser.add_mutually_exclusive_group()
     profiles.add_argument("--modulation", choices=("bpsk", "2fsk", "msk", "gmsk", "qpsk"))
     profiles.add_argument(
@@ -219,6 +271,12 @@ def main():
     parser.add_argument("--tdd-period", type=float, help="test-only host-scheduled TDD period")
     parser.add_argument("--tdd-guard", type=float, default=0.01, help="host TDD guard in seconds")
     parser.add_argument("--timed-tx", action="store_true")
+    parser.add_argument("--timing-diagnostics", action="store_true")
+    parser.add_argument(
+        "--tx-batch-packets",
+        type=int,
+        help="override shared-device host batch size in transport packets (1..256)",
+    )
     parser.add_argument("--tx-gain", type=float)
     parser.add_argument("--clock-sync", action="store_true")
     parser.add_argument("--scheduled-tdd", action="store_true")
@@ -231,6 +289,12 @@ def main():
     parser.add_argument("--restart-follower", action="store_true")
     parser.add_argument("--output", type=Path, help="optional temporary JSON report")
     args = parser.parse_args()
+    if args.tx_batch_packets is not None and (
+        not args.shared_device or not 1 <= args.tx_batch_packets <= 256
+    ):
+        parser.error("--tx-batch-packets requires --shared-device and a value in 1..256")
+    if args.shared_device and args.restart_follower:
+        parser.error("shared-device restart is not supported by this check")
     for name in (
         "duration",
         "rate",
@@ -288,6 +352,7 @@ def main():
     peers = []
     outputs = []
     sender = None
+    shared = None
     try:
         sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         with tempfile.TemporaryDirectory(prefix="radio-link-check-") as directory:
@@ -370,13 +435,30 @@ def main():
                 sock.bind((c.endpoint.destination_host, c.endpoint.destination_port))
                 sock.setblocking(False)
                 outputs.append(sock)
+            if args.tx_batch_packets is not None:
+                configs = [
+                    replace(
+                        c, link=replace(c.link, hardware_tx_batch_packets=args.tx_batch_packets)
+                    )
+                    for c in configs
+                ]
             validate_network(dict(enumerate(configs)))
             report["timed_tx"] = all(c.link.hardware_timed_io for c in configs)
             report["clock_sync"] = all(c.link.hardware_clock_sync for c in configs)
             report["scheduled_tdd"] = all(c.link.hardware_slot_scheduling for c in configs)
             report["settings"] = [report_configuration(c) for c in configs]
-            for config in configs:
-                peers.append(start(config, audit_packets=args.payload < 8))
+            if args.shared_device:
+                shared = SharedRadios(configs)
+                report["scope"] = "single-host shared-device two-thread UDP characterization"
+            for i, config in enumerate(configs):
+                peers.append(
+                    start(
+                        config,
+                        audit_packets=args.payload < 8,
+                        timing_diagnostics=args.timing_diagnostics,
+                        sdr=None if shared is None else shared.radios[i],
+                    )
+                )
             report["hardware"] = [peer[0].hardware_info for peer in peers]
             ready = max(peer[0].hardware_ready_time for peer in peers)
             acquisition_payloads = [b"\xfeACQUIRE-A", b"\xfdACQUIRE-B"]
@@ -552,6 +634,12 @@ def main():
                 after["process_cpu_seconds"] - before["process_cpu_seconds"]
                 for before, after in zip(report["before"], report["after"])
             ]
+            if shared is not None:
+                # Both snapshots measure the SAME process, including both peers
+                # and the traffic driver; never sum these values as per-node CPU.
+                report["shared_process_cpu_seconds_during_workload_and_grace"] = report.pop(
+                    "cpu_seconds_during_workload_and_grace"
+                )[0]
             if args.interrupt_seconds:
                 for peer in peers:
                     request(peer, "mute")
@@ -575,7 +663,7 @@ def main():
             if args.restart_follower:
                 request(peers[1], "stop")
                 peers[1] = None
-                peers[1] = start(configs[1])
+                peers[1] = start(configs[1], timing_diagnostics=args.timing_diagnostics)
                 ready = time.monotonic()
                 inject(seq)
                 until = ready + 5
@@ -595,6 +683,11 @@ def main():
                     report["shutdown"].append(request(peer, "stop"))
                     peers[i] = None
             report["shutdown_passed"] = True
+            if not args.restart_follower:
+                report["post_workload_stream_errors"] = post_workload_stream_errors(
+                    report["after"], report["shutdown"]
+                )
+                report["stream_passed"] &= not any(report["post_workload_stream_errors"])
     except BaseException as exc:
         report["errors"].append(repr(exc))
         raise
@@ -609,6 +702,8 @@ def main():
                         process.terminate()
                         process.join(3)
                 pipe.close()
+        if shared is not None:
+            shared.close()
         for sock in outputs:
             sock.close()
         if sender is not None:

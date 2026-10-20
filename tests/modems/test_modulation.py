@@ -134,6 +134,9 @@ def test_bpsk_discards_idle_history_and_decodes_later_burst():
     for start in range(0, len(burst), 4096):
         frames.extend(receiver.feed(burst[start : start + 4096]))
 
+    # Live RX continues after the burst, allowing neighboring timing candidates
+    # to finish before the decoder commits a frame or a CRC failure.
+    frames.extend(receiver.feed(np.zeros(16, dtype=np.complex64)))
     assert frames == [payload]
     assert len(receiver._samples) < 20_000
 

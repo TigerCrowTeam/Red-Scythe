@@ -8,16 +8,20 @@ settings and closes it after inspection.
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
-from packet_radio.config import load_config, validate_network
+from packet_radio.config import configuration_snapshot, load_config, validate_network
 from packet_radio.hardware.uhd import UHDRadio
-from packet_radio.modems.registry import make_modem
-from packet_radio.protocol.framing import RadioPacket
+from packet_radio.protocol.registry import resolve_processing
 
 
 def validate_hardware(config) -> str:
-    radio = UHDRadio(config.sdr, config.frequency.frequencies_hz)
+    radio = UHDRadio(
+        config.sdr,
+        config.frequency.frequencies_hz,
+        tx_idle_samples=resolve_processing(config).tx_idle_samples(config.sdr),
+    )
     try:
         return str(radio.actual_settings)
     finally:
@@ -32,8 +36,13 @@ def main() -> None:
         action="store_true",
         help="also check one config against its auto-detected/configured SDR",
     )
+    parser.add_argument(
+        "--resolved", action="store_true", help="print resolved settings as JSON without key paths"
+    )
     args = parser.parse_args()
     try:
+        if args.resolved and args.hardware:
+            raise ValueError("--resolved and --hardware must be used separately")
         loaded = {str(Path(path)): load_config(path) for path in args.configs}
         if len(loaded) > 1:
             validate_network(loaded)
@@ -42,14 +51,44 @@ def main() -> None:
                 raise ValueError("--hardware accepts exactly one node configuration")
             details = validate_hardware(next(iter(loaded.values())))
             print(f"hardware valid: {details}")
-        for path, config in loaded.items():
-            size = RadioPacket(
-                config.node_id, config.peer_id, 0, bytes(config.endpoint.max_payload_bytes)
-            ).encoded_size(authenticated=config.authentication.private_key_file is not None)
-            airtime_ms = make_modem(config.sdr).sample_count(size) / config.sdr.sample_rate * 1000
-            print(f"valid: {path} ({config.timing_role} node {config.node_id})")
+        if args.resolved:
+            from packet_radio.profiles import profile_fingerprint
+
             print(
-                f"  {config.sdr.modulation}: center={config.center_frequency_hz:g} Hz, "
+                json.dumps(
+                    {
+                        path: {
+                            "configuration": configuration_snapshot(config),
+                            "processing": resolve_processing(config).describe(),
+                            "profile_sha256": profile_fingerprint(config.emulation)
+                            if config.emulation
+                            else None,
+                        }
+                        for path, config in loaded.items()
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return
+        for path, config in loaded.items():
+            processing = resolve_processing(config)
+            size = processing.codec.payload_size(
+                config.endpoint.max_payload_bytes,
+                authenticated=config.authentication.private_key_file is not None,
+            )
+            airtime_ms = (
+                processing.make_modem(config.sdr).sample_count(size) / config.sdr.sample_rate * 1000
+            )
+            print(f"valid: {path} ({config.timing_role} node {config.node_id})")
+            frequency_text = (
+                f"center={config.center_frequency_hz:g} Hz"
+                if len(config.frequency.frequencies_hz) == 1
+                else f"frequencies={list(config.frequency.frequencies_hz)} Hz, "
+                f"hop_rate={1 / config.frequency.interval_seconds:g}/s"
+            )
+            print(
+                f"  {config.sdr.modulation}: {frequency_text}, "
                 f"bit_rate={config.sdr.bit_rate_bps:g} bps, "
                 f"symbol_rate={config.sdr.symbol_rate_baud:g} baud, "
                 f"samples/symbol={config.sdr.samples_per_symbol}, max_burst={airtime_ms:.3f} ms"

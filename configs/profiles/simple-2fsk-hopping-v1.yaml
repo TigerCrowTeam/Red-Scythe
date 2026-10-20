@@ -1,0 +1,55 @@
+profile_version: 1
+id: simple-2fsk-hopping-v1
+revision: 1
+reference: docs/CONFIGURATION.md Version 1.1 frequency hopping, revision 1
+qualification: qualified
+limitations:
+- Project-defined profile; no commercial-radio interoperability claim.
+- External UTC synchronization required; no on-air acquisition beacon.
+- Host stop/tune/restart only; maximum configured rate 1 hop/s; two-host operation
+  unqualified.
+- Qualified only for the documented same-host 914/915/916 MHz cycle at 1 hop/s,
+  100 ms guards, 10 ms timed TX lead and background decoding; see MODULATION_RESULTS.md.
+waveform:
+  modulation: 2fsk
+  sample_rate_hz: 2000000
+  bandwidth_hz: 1000000
+  bit_rate_bps: 250000
+  frequency_deviation_hz: 125000
+frequency:
+  mode: hopping
+  frequencies_hz:
+  - 914000000
+  - 915000000
+  - 916000000
+  dwell_seconds: 1.0
+  guard_seconds: 0.1
+  epoch: 0
+  synchronization: external-utc
+  sequence_mode: cycle
+  repeated_frequencies: reject
+packet:
+  format: simple-frame-v1
+  max_payload_bytes: 1024
+  frame:
+    preamble: '55'
+    preamble_repetitions: 32
+    sync: a7c35a9e
+    bit_order: big
+    length_bytes: 2
+    length_byte_order: big
+    fixed_payload_bytes: null
+    crc: crc16-ccitt-false
+    crc_byte_order: big
+    whitening: none
+    differential: false
+protection:
+  scheme: none
+  interleaver_depth: 16
+  bit_repetitions: 1
+  rs_parity_bytes: 0
+link:
+  mode: ack-free
+  minimum_gap_seconds: 0.002
+  minimum_interval_seconds: 0.0
+  turnaround_seconds: 0.002

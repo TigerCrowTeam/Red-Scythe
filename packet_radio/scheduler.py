@@ -46,8 +46,20 @@ class FrequencyScheduler:
             index=index,
             frequency_hz=self.config.frequencies_hz[index],
             slot=slot,
-            transmit_allowed=distance >= self.config.guard_seconds,
+            transmit_allowed=distance >= self.config.guard_seconds
+            and (elapsed >= 0 or len(self.config.frequencies_hz) == 1),
             seconds_to_change=self.config.interval_seconds - offset,
+        )
+
+    def burst_fits(self, duration_seconds: float, now: float | None = None) -> bool:
+        """Admit the entire lead, burst and drain margin in the current dwell."""
+        if len(self.config.frequencies_hz) == 1:
+            return True
+        state = self.state(now)
+        return (
+            duration_seconds >= 0
+            and state.transmit_allowed
+            and duration_seconds <= state.seconds_to_change - self.config.guard_seconds
         )
 
     def scan_order(self, now: float | None = None) -> list[float]:

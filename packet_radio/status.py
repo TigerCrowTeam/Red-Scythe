@@ -34,6 +34,8 @@ def format_text(snapshot: dict[str, Any]) -> str:
         f"frequency={frequency_text} synchronized={snapshot['synchronized']} "
         f"signal_power={snapshot['estimated_signal_power']:.4g} "
         f"queue={snapshot['queue_depth']} pending_ack={snapshot['awaiting_acknowledgements']} "
+        f"oldest_queue_ms={snapshot.get('oldest_pending_packet_age_ms', 0) or 0:.1f} "
+        f"queue_expired={snapshot.get('queue_expired', 0)} "
         f"tx={snapshot['packets_transmitted']} rx={snapshot['packets_received']} "
         f"retries={snapshot['retries']} crc_failures={snapshot['crc_failures']} "
         f"drops={snapshot['queue_drops']} invalid={snapshot['invalid_packets']} "
@@ -87,9 +89,11 @@ def render_endpoint(
         code = (
             200
             if (
-                snapshot["synchronized"]
-                and snapshot.get("radio_ready")
-                and snapshot.get("peer_active")
+                snapshot.get("radio_ready")
+                and (
+                    not snapshot.get("requires_peer", True)
+                    or (snapshot["synchronized"] and snapshot.get("peer_active"))
+                )
             )
             else 503
         )

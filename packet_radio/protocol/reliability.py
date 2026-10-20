@@ -12,21 +12,11 @@ import random
 import time
 from collections import OrderedDict, deque
 from collections.abc import Callable
-from dataclasses import dataclass
 
 from packet_radio.config import LinkConfig
 from packet_radio.protocol.framing import ACK_REFERENCE, BROADCAST_ID, PacketKind, RadioPacket
+from packet_radio.protocol.interfaces import QueuedPacket
 from packet_radio.statistics import LinkStatistics
-
-
-@dataclass
-class QueuedPacket:
-    packet: RadioPacket
-    sequence_assigned: bool = False
-    attempts: int = 0
-    next_attempt: float = 0.0
-    enqueued_at: float = 0.0
-    airtime_seconds: float = 0.0
 
 
 class ReliableLink:
@@ -61,6 +51,7 @@ class ReliableLink:
         self.seen: OrderedDict[tuple[int, int, int], float] = OrderedDict()
 
     def enqueue(self, packet: RadioPacket) -> bool:
+        self._expire_data(self.clock())
         airtime_seconds = self.airtime(packet)
         control = packet.kind in (PacketKind.ACK, PacketKind.SYNC)
         target = self.control_queue if control else self.queue
@@ -86,6 +77,7 @@ class ReliableLink:
 
     def next_packet(self, channel_clear: bool, tx_allowed: bool) -> QueuedPacket | None:
         now = self.clock()
+        self._expire_data(now)
         self._expire_seen(now)
         for key, queued in list(self.awaiting_ack.items()):
             if now >= queued.next_attempt and queued.attempts > self.config.max_retries:
@@ -141,6 +133,8 @@ class ReliableLink:
         if queued.packet.kind == PacketKind.DATA and queued.attempts:
             self.statistics.increment("retries")
         queued.attempts += 1
+        if self.statistics.timing.enabled:
+            queued.last_transmitted_at = self.clock()
         packet = queued.packet
         self.statistics.increment("packets_transmitted")
         self.statistics.increment(
@@ -161,11 +155,20 @@ class ReliableLink:
             return False
         if len(packet.payload) != ACK_REFERENCE.size:
             return False
+        self._expire_data(self.clock())
         session, sequence = ACK_REFERENCE.unpack(packet.payload)
         key = (packet.source, sequence)
         queued = self.awaiting_ack.get(key)
         if queued is None or queued.packet.session_id != session:
             return False
+        if self.statistics.timing.enabled:
+            self.statistics.timing.observe(
+                "enqueue_to_ack_ms", (self.clock() - queued.enqueued_at) * 1000
+            )
+            if queued.last_transmitted_at is not None:
+                self.statistics.timing.observe(
+                    "tx_completion_to_ack_ms", (self.clock() - queued.last_transmitted_at) * 1000
+                )
         del self.awaiting_ack[key]
         self.statistics.increment("acknowledgements_received")
         self._update_gauges()
@@ -206,7 +209,24 @@ class ReliableLink:
             q.airtime_seconds for q in self.awaiting_ack.values()
         )
 
+    def _expire_data(self, now: float) -> None:
+        limit = self.config.queue_max_age_seconds
+        if limit is None:
+            return
+        expired = [q for q in self.queue if now - q.enqueued_at >= limit]
+        self.queue = deque(q for q in self.queue if now - q.enqueued_at < limit)
+        for key, queued in list(self.awaiting_ack.items()):
+            if now - queued.enqueued_at >= limit:
+                expired.append(self.awaiting_ack.pop(key))
+        if expired:
+            self.statistics.increment("queue_expired", len(expired))
+            self._update_gauges()
+
     def _update_gauges(self) -> None:
+        pending = [*self.queue, *self.awaiting_ack.values(), *self.control_queue]
+        now = self.clock()
+        oldest = min((q.enqueued_at for q in pending), default=now)
+        self.statistics.set_gauge("oldest_pending_packet_age_ms", max(0, (now - oldest) * 1000))
         self.statistics.set_gauge("queue_airtime_seconds", self.queued_airtime())
         self.statistics.set_gauge("queue_depth", len(self.queue) + len(self.awaiting_ack))
         self.statistics.set_gauge("control_queue_depth", len(self.control_queue))

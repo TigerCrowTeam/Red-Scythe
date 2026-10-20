@@ -205,3 +205,90 @@ def test_retry_counter_counts_transmissions_not_missed_window_selections():
     assert link.statistics.snapshot()["retries"] == 0
     link.transmitted(queued)
     assert link.statistics.snapshot()["retries"] == 1
+
+
+def test_ack_timing_includes_queue_wait_and_tracks_latest_retry_completion():
+    from packet_radio.statistics import LinkStatistics
+
+    clock = Clock()
+    stats = LinkStatistics(clock, timing_diagnostics=True)
+    link = ReliableLink(2, LinkConfig(ack_timeout_seconds=1), clock, stats)
+    packet = RadioPacket(2, 1, 7, b"payload")
+    link.enqueue(packet)
+    clock.now = 2
+    queued = link.next_packet(True, True)
+    link.transmitted(queued)
+    clock.now = 3.5
+    assert link.next_packet(True, True) is queued
+    link.transmitted(queued)
+    clock.now = 4
+    ack = RadioPacket(1, 2, 7, struct.pack("!QI", 0, 7), PacketKind.ACK)
+    assert link.acknowledge(ack)
+    assert not link.acknowledge(ack)
+    timing = stats.snapshot()["timing_diagnostics"]
+    assert timing["enqueue_to_ack_ms"]["mean"] == 4000
+    assert timing["tx_completion_to_ack_ms"]["mean"] == 500
+    assert timing["enqueue_to_ack_ms"]["count"] == 1
+    assert stats.snapshot()["oldest_pending_packet_age_ms"] == 0
+
+
+def test_empty_queue_age_is_zero_even_when_host_clock_advances():
+    from itertools import count
+
+    from packet_radio.statistics import LinkStatistics
+
+    ticks = count(10.0, 0.001)
+
+    def clock():
+        return next(ticks)
+
+    stats = LinkStatistics(clock, timing_diagnostics=True)
+    link = ReliableLink(2, LinkConfig(), clock, stats)
+    link._update_gauges()
+    assert stats.snapshot()["oldest_pending_packet_age_ms"] == 0
+
+
+def test_queue_age_expiry_runs_while_blocked_and_preserves_control():
+    clock = Clock()
+    link = ReliableLink(1, LinkConfig(queue_size=1, queue_max_age_seconds=1), clock)
+    assert link.enqueue(RadioPacket(1, 2, 1, b"old"))
+    control = RadioPacket(1, 2, 2, b"sync", PacketKind.SYNC)
+    assert link.enqueue(control)
+    clock.now = 1
+    assert link.next_packet(False, False) is None
+    assert not link.queue
+    assert link.control_queue[0].packet == control
+    assert link.statistics.snapshot()["queue_expired"] == 1
+    assert link.enqueue(RadioPacket(1, 2, 3, b"fresh"))
+    assert link.statistics.snapshot()["queue_drops"] == 0
+
+
+def test_expired_inflight_data_cannot_retry_or_be_acknowledged():
+    clock = Clock()
+    link = ReliableLink(2, LinkConfig(queue_max_age_seconds=1), clock)
+    packet = RadioPacket(2, 1, 7, b"payload")
+    link.enqueue(packet)
+    queued = link.next_packet(True, True)
+    link.transmitted(queued)
+    clock.now = 1
+    ack = RadioPacket(1, 2, 7, struct.pack("!QI", 0, 7), PacketKind.ACK)
+    assert not link.acknowledge(ack)
+    assert not link.awaiting_ack
+    assert link.next_packet(True, True) is None
+    snapshot = link.statistics.snapshot()
+    assert snapshot["queue_expired"] == 1
+    assert snapshot["retry_exhausted"] == 0
+    assert snapshot["queue_depth"] == 0
+
+
+def test_default_preserves_data_and_reports_age_without_timing_diagnostics():
+    clock = Clock()
+    link = ReliableLink(1, LinkConfig(), clock)
+    link.enqueue(RadioPacket(1, 2, 1, b"held"))
+    clock.now = 100
+    assert link.next_packet(False, False) is None
+    snapshot = link.statistics.snapshot()
+    assert snapshot["oldest_pending_packet_age_ms"] == 100_000
+    assert "timing_diagnostics" not in snapshot
+    assert snapshot["queue_expired"] == 0
+    assert link.next_packet(True, True).packet.payload == b"held"

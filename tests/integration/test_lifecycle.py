@@ -126,15 +126,29 @@ def test_hardware_epoch_waits_for_target_and_sets_nanoseconds(app, monkeypatch):
     app.sdr.set_hardware_time.assert_called_once_with(101_000_000_000)
 
 
-def test_runner_installs_both_shutdown_handlers(monkeypatch):
+@pytest.mark.parametrize("timing", [False, True])
+def test_runner_installs_both_shutdown_handlers(monkeypatch, timing):
     instance = Mock()
     factory = Mock(return_value=instance)
     handler = Mock()
     monkeypatch.setattr(application, "RadioApp", factory)
     monkeypatch.setattr(application.signal, "signal", handler)
     config = node("leader", 1)
-    application.run(config)
-    factory.assert_called_once_with(config)
+    application.run(config, timing_diagnostics=timing)
+    factory.assert_called_once_with(config, timing_diagnostics=timing)
     assert handler.call_args_list[0].args == (signal.SIGINT, instance.stop)
     assert handler.call_args_list[1].args == (signal.SIGTERM, instance.stop)
     instance.run.assert_called_once()
+
+
+def test_runtime_batch_setting_reaches_backend_before_application_runs():
+    config = node("leader", 1)
+    config = replace(config, link=replace(config.link, hardware_tx_batch_packets=16))
+    radio = SimulatedChannel().radio()
+    radio.set_tx_batch_packets = Mock()
+    result = RadioApp(config, sdr=radio, endpoint=MemoryEndpoint())
+    try:
+        radio.set_tx_batch_packets.assert_called_once_with(16)
+        assert result.statistics.snapshot()["packets_transmitted"] == 0
+    finally:
+        result.close()

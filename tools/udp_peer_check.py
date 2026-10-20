@@ -17,6 +17,7 @@ from pathlib import Path
 from urllib.request import urlopen
 
 from packet_radio.config import configuration_snapshot, load_config
+from packet_radio.protocol.registry import resolve_processing
 
 HEADER = struct.Struct("!4s8sBBQH")
 STREAM_COUNTERS = (
@@ -73,7 +74,11 @@ def run_probe(
     }
     if not before.get("radio_ready") or any(before.get(k) != v for k, v in expected.items()):
         raise ValueError("running radio status does not match the requested profile")
-    if before.get("configuration") != configuration_snapshot(config):
+    processing = resolve_processing(config)
+    expected_configuration = configuration_snapshot(config)
+    expected_configuration["packet_format"] = processing.name
+    expected_configuration["processing"] = processing.describe()
+    if before.get("configuration") != expected_configuration:
         raise ValueError("running radio effective configuration differs from the profile")
     if any(k not in before for k in STREAM_COUNTERS):
         raise ValueError("running radio is missing required diagnostic counters")

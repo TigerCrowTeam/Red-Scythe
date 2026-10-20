@@ -19,7 +19,7 @@ sudo apt install uhd-host python3-uhd python3-venv
 /usr/bin/python3 -c 'import uhd; print(uhd.__file__)'
 /usr/bin/python3 -m venv --system-site-packages .venv-uhd
 source .venv-uhd/bin/activate
-python -m pip install /path/to/packet_radio-1.0.0-py3-none-any.whl
+python -m pip install /path/to/packet_radio-1.1.0-py3-none-any.whl
 packet-radio-conformance
 mkdir -p ~/packet-radio-work
 cp -r "$VIRTUAL_ENV/share/packet-radio/configs" ~/packet-radio-work/
@@ -80,8 +80,9 @@ and overflow drops its oldest block with a counter. Tuning/clock resets stop and
 drain old RX data before restarting. Clean shutdown stops the RX worker before
 releasing UHD references. UHD has no required `closeStream` compatibility layer.
 
-TX handles partial transfers, uses one start-of-burst marker, sends a separate
-zero-length end-of-burst marker, and waits for UHD's asynchronous burst completion.
+TX handles partial transfers, uses one start-of-burst marker, carries the
+end-of-burst flag on the final IQ submission, and waits for UHD's asynchronous
+burst completion. An empty end marker is reserved for error cleanup.
 A device burst acknowledgement is distinct from the remote protocol ACK. Send
 and completion waits have bounded deadlines. No fixed post-transmit sleep is used.
 
@@ -236,3 +237,424 @@ stream or endpoint errors and no retry exhaustion; echo additionally requires
 p95 RTT at most one second. The reports include missing sequences, profile hashes,
 configuration/hardware snapshots and stream deltas. Summarize completed hardware
 results in `MODULATION_RESULTS.md` and discard temporary JSON afterward.
+
+## Two endpoints on one X310
+
+The measured comparison is in [MODULATION_RESULTS.md](../MODULATION_RESULTS.md#x310-two-channel-comparison--2026-10-14).
+The simple profiles and hopping passed; the legacy reliable-link workloads
+showed timing failures and backlog. The shared X310 reliable-link path remains
+experimental and is not yet an overall performance upgrade over the B205 pair.
+
+Use a single process to own the board, with channel 0 for daughterboard A and
+channel 1 for B. Do not launch two independent processes against the same X310.
+The paired launcher opens one `MultiUSRP`, initializes its UTC clock once before
+streaming, and gives each endpoint its own RX/TX streamers. Channel controls are
+serialized; closing one endpoint does not release the other's stream. A runtime
+failure stops both endpoints.
+
+For the conducted bench, cross A TX/RX through 30 dB attenuation to B RX2 and B
+TX/RX through 30 dB attenuation to A RX2. The supplied node examples select
+192.168.10.2 and use distinct UDP and status ports:
+
+```bash
+packet-radio --config configs/v1_1/peer-a-x310-simple.yaml \
+  --peer-config configs/v1_1/peer-b-x310-simple.yaml
+```
+
+Both profiles must select the same UHD `type: x300` device and different channel
+numbers, with compatible waveform/link settings. Generic packet formats still
+require authentication keys or the explicit isolated-bench unauthenticated flag.
+The paired launcher is currently limited to the X300 device family.
+
+UBX-160 boards have a fixed analog filter. The requested profile bandwidth remains
+the waveform's configured bandwidth; UHD's reported actual analog bandwidth is
+160 MHz at 915 MHz. The adapter accepts a narrower request only when the hardware
+reports a fixed filter, records both requested and actual values, and still
+requires the exact configured digital sample rate. This does not provide a
+narrow analog filter or establish spectral-mask compliance.
+
+`tools/uhd_link_check.py` and `tools/simple_link_check.py` accept
+`--shared-device --profiles NODE_A NODE_B` for the same paired setup.
+`tools/hopping_check.py --shared-address 192.168.10.2 --seconds 60` runs the short
+conducted 1 hop/s workload using channels 0 and 1. Add `--hop-rate 2` to select the
+separate 2 hop/s X310 profile. Each 60-second run adds six seconds of 1/64/1024-byte
+payload boundaries and deliberately rejected late packets on both channels, then
+six dwells for off-channel interruption and recovery. It checks exact ordered
+payloads, zero stream errors, zero missed steady hops/deadlines, TX target/sample
+bounds against both guards and clean shutdown. `--first-phase` changes channel 0's
+injection phase in seconds; the default is 0.2. These commands transmit RF.
+
+The hopping tool separately reports host stop/drain duration, RX/TX tuning and
+readback call duration, restart-command duration, first buffered RX arrival,
+first samples passed to the decoder after settling, and successful packet delivery.
+Phase values are relative to the dwell boundary, not packet latency. The RF-control
+call duration is not a PLL lock measurement. TX target checks use a device-time read
+bracketed by host timestamps and include the bracket uncertainty at the trailing
+guard. This is software/timestamp evidence, not an independent RF edge measurement.
+Instrumentation is local to this benchmark and does not add clocks or wrappers to
+normal application operation.
+Generic shared-device CPU results describe the whole process, including both
+endpoints and the UDP driver; do not add them as independent per-node values.
+The old B205 baseline used two processes and independent device clocks, so the
+comparison includes those architectural differences as well as the RF hardware.
+
+### X310 host transport assessment
+
+At the measured two-channel 2 Msps workload, retain the existing 1 Gb Ethernet
+transport and host settings. Step 8 compares application latency, shared-process
+CPU and stream errors before proposing a buffer change; removing a startup
+warning alone is not a performance improvement. The 512 KiB candidate passed
+normal traffic but reported a TX underflow in its third maximum-payload run;
+complete payload delivery did not satisfy the zero-stream-error gate. A baseline
+recheck also reported an underflow, so buffer size is not an established cause or
+fix. Both failures involved roughly 20 ms submission attempts with about 9.4 ms
+initial TX lead. The subsequent burst-timing investigation reproduced starvation
+at Python return boundaries and qualified final-data EOB plus a larger QPSK host
+batch; see the burst-submission follow-up in `MODULATION_RESULTS.md`. This does
+not establish the OS-level cause of every historical delay. Step 9 subsequently
+found repeatable BPSK/QPSK echo latency failures despite clean stream counters.
+The subsequent PSK receive-ordering/lookahead fix passed three echo repeats per
+mode and the affected traffic/recovery checks, closing the documented same-host
+conducted acceptance matrix. The subsequent revised-code B205 comparison found
+PSK and reliable-link recovery failures; retain the X310 as the reference within
+that tested scope. Independent-host interoperability remains unqualified. The
+smaller buffer is not an adopted setting.
+Final transport comparisons are in
+[Step 8 results](../MODULATION_RESULTS.md#x310-step-8-host-transport--2026-10-15);
+[Step 9 results](../MODULATION_RESULTS.md#x310-step-9-qualification-closeout--2026-10-15)
+preserve the initial PSK echo failure, with the resolution in the
+[PSK follow-up](../MODULATION_RESULTS.md#x310-psk-echo-acceptance-follow-up--2026-10-15).
+The [B205 comparison](../MODULATION_RESULTS.md#b205mini-revised-code-comparison--2026-10-15)
+records the same-code hardware follow-up, including failed workloads and startup
+buffer drops; it is not a blanket qualification of the B205 profiles.
+
+The measured host uses `enp132s0`, MTU 1500 and a 1000 Mb/s full-duplex link.
+`net.core.rmem_max` is 50,000,000 bytes and `net.core.wmem_max` is 1,048,576 bytes;
+both default socket sizes are 212,992 bytes. UHD requests 2,453,333 bytes for its
+stream transport buffers. RX receives that allocation; TX is capped at 1,048,576
+bytes and UHD emits its startup warning. These observations describe this host,
+not required installation-wide defaults.
+
+Inspect the path and counters before and after a workload:
+
+```bash
+ip route get 192.168.10.2
+ip -s link show dev enp132s0
+ethtool enp132s0
+ethtool -S enp132s0
+sysctl net.core.rmem_max net.core.wmem_max net.core.rmem_default net.core.wmem_default
+ss -unmp dst 192.168.10.2
+```
+
+While UHD is open, `ss` shows connected stream sockets on remote UDP port 49153.
+Its `skmem` `rb`/`tb` fields use Linux's doubled socket-buffer accounting: the
+observed default stream values are `rb4906666,tb2097152`. A 524,288-byte UHD TX
+request produces `tb1048576`. These are capacity limits, not queue occupancy or
+latency; inspect the queue and error counters as well. Control sockets can have
+different sizes. Linux documents this accounting in [socket(7)](https://man7.org/linux/man-pages/man7/socket.7.html).
+
+For a reversible, per-process comparison, use **test copies** of both paired node
+files and add a string-valued transport argument under each `hardware.device`:
+
+```yaml
+hardware:
+  device:
+    type: x300
+    addr: 192.168.10.2
+    send_buff_size: '524288'
+```
+
+Keep every other field unchanged. Historical Step 8 used QPSK's 16-packet TX
+batch; current examples use 256 after the burst-timing follow-up. Hold the batch
+size fixed within a comparison; current code/settings do not reproduce the old
+baseline. If the test copies are outside the configuration directory, resolve
+their `profile` path to
+an absolute path. Both nodes must have identical device arguments. Close the
+previous process before reopening with the new setting; delete the test override
+to restore the original behavior. `recv_buff_size` is also a UHD device argument,
+but RX buffer sizing was not changed in this assessment. UHD's
+[transport notes](https://files.ettus.com/manual/page_transport.html) describe these
+parameters and their kernel caps.
+
+Use the existing workload for each pair of test nodes:
+
+```bash
+PYTHONPATH=. python tools/uhd_link_check.py --shared-device \
+  --profiles NODE_A NODE_B --duration 30 --rate 5 --payload 256 \
+  --timing-diagnostics
+```
+
+Require exact delivery, no stream/timing errors, no expired or queued payloads,
+and clean shutdown. Compare packet p95 and whole shared-process CPU over the
+same workload and drain period. Repeat an apparent improvement with alternating
+settings before adopting it. Do not run software tests or other RF benchmarks
+concurrently. The 256 KiB pilot is below UHD's reported 307,200-byte minimum
+recommendation and is not an adopted setting.
+
+A larger-than-cap test requires administrator authentication, which was unavailable
+in this session. It was not necessary to change the cap to assess the current
+workload. If a later measured bottleneck warrants that test, save the original
+`net.core.wmem_max`, temporarily set it to the intended request with
+`sudo sysctl -w net.core.wmem_max=2453333`, reopen UHD and repeat the same workload,
+then restore the saved value with `sudo sysctl -w net.core.wmem_max=OLD_VALUE`.
+Verify the restored value and close/reopen UHD again. Do not write a persistent
+sysctl configuration until a reproducible improvement has been established.
+No receive-limit, NIC offload/coalescing, scheduling-priority or CPU-affinity
+change is prescribed by these measurements.
+
+The NIC's cumulative error count needs startup context. In this assessment,
+`rx_length_errors` and `rx_errors` each increased by six during UHD initialization
+and remained stable during application traffic. UHD 4.9's
+[X300 Ethernet source](https://github.com/EttusResearch/uhd/blob/v4.9.0.1/host/lib/usrp/x300/x300_eth_mgr.cpp)
+probes frame sizes up to its discovery ceiling. A separate transport check with
+`recv_frame_size=1472,send_frame_size=1472` constrained that ceiling and eliminated
+the startup error-counter increment, while the default and capped runs both
+streamed cleanly at the same actual 1472-byte frame size. This supports the
+probe explanation, not a claim that every NIC error is harmless. No frame-size
+override was adopted; compare deltas during the workload before changing MTU.
+
+At sc16, two 2 Msps channels carry 128 Mbit/s of sample payload per direction,
+before transport overhead. This arithmetic is not a maximum-capacity guarantee;
+the simultaneous RX/TX transport test supplies the workload evidence. Consider
+10 Gb Ethernet only for a separately specified higher-rate/channel workload that
+exceeds the measured path, then qualify its NIC, FPGA image, link and host settings.
+
+### Optional packet timing diagnostics
+
+Add `--timing-diagnostics` to `python -m packet_radio` (including paired
+`--peer-config` launches), `tools/uhd_link_check.py`, or
+`tools/simple_link_check.py`. This is a runtime
+diagnostic option, disabled by default; it does not change the profile schema.
+Use JSON status or the local status HTTP endpoint to inspect the
+`timing_diagnostics` object. The benchmark includes it in peer snapshots.
+No capture or output file is required.
+
+Each metric reports lifetime count, mean, minimum and maximum, plus
+`recent_count` and `recent_p95` over at most the last 256 observations.
+Snapshots include startup activity; compare before/after counts and weighted
+means for workload-only analysis. Rolling p95 values cannot be subtracted.
+Observations are aggregated separately for each radio application.
+
+- Host monotonic durations have an `_ms` suffix: payload enqueue, packet
+  selection, fresh encoding/modulation, radio transmit, RX decode, frame
+  handling through successful endpoint delivery, and ACK handling.
+- `selected_packet_age_ms` includes queue residence and repeated selections;
+  `enqueue_to_ack_ms` includes retries. `tx_completion_to_ack_ms` starts at
+  the latest completed transmission, not its first RF sample. Queue depth
+  remains available; `oldest_pending_packet_age_ms` is refreshed on link
+  updates and is available even when timing instrumentation is disabled.
+- `recognized_batch_queue_ms` measures decoder-output residence before the
+  main loop handles a batch. It is a host duration, not RF propagation time.
+- `rx_buffer_queue_ms` measures host residence from enqueue in `BufferedRadio`
+  to dequeue by the receiver. Unknown enqueue times are omitted. It excludes
+  device/NIC buffering and the UHD read itself; it never subtracts an RF
+  timestamp from a host timestamp. `rx_buffer_queue_blocks` samples the number
+  of blocks remaining at dequeue, not a continuous high-water mark.
+- `rx_frame_buffer_tail_ms` converts samples already buffered beyond a decoded
+  frame's consumed end to milliseconds at the sample rate. It helps identify
+  burst-end waiting, but is not a host duration: it can include shaping tails,
+  read-block rounding, or following packets already in the same buffer.
+- `app_step`, `decoder_feed`, `decoder_status` and `rx_worker` each expose
+  `_wall_ms` and `_cpu_ms` summaries. CPU uses the current thread's CPU clock;
+  wall time includes blocking and scheduling. Their difference is **not a
+  measurement of GIL contention**. Application steps include receive/TX waits;
+  decoder feed covers the modem call; decoder status covers the application
+  reading worker diagnostics; RX worker covers read/copy/enqueue after acquiring
+  its I/O lock. These are scoped costs, not complete lifetime thread utilization.
+  Application-step time includes decoder-status time; do not sum nested scopes.
+- `uhd_control`, `decoder_state` and `rx_io` expose `_wait_ms` and `_hold_ms`.
+  They measure explicit lock acquisition and ownership separately, then record
+  observations after release. Acquisition duration can include host scheduling
+  delay; it is not proof of mutex blocking alone. UHD control includes device-time reads and tuning,
+  not independent stream sends/receives. RX I/O measurements cover the drain
+  loop; decoder state measurements cover its statistics readers/writers.
+  Disabled instrumentation reads neither elapsed nor thread-CPU clocks for
+  these scopes. Rolling p95 and lifetime extrema have the definitions above;
+  they are not hard scheduling bounds.
+- UHD metrics include requested/accepted samples and data send calls per
+  attempt, individual send duration, submission duration (including EOB),
+  completion wait, and total burst duration. Sample counts exclude
+  empty error-cleanup calls and include configured transport idle. Successful
+  submissions carry EOB on the final data call. Completed send calls are
+  counted; a call that throws before returning is not counted. Submission
+  duration requires successful EOB; completion and total burst duration require
+  a burst ACK. Error counters must therefore be reviewed alongside timings.
+- `first_send_hardware_lead_ms` subtracts current **device time** from the
+  intended target immediately before first submission. Negative values mean
+  the target has already passed. `scheduled_tx_target_ns` is a hardware
+  timestamp, never a host monotonic timestamp; for ordinary timed data it is
+  updated after successful transmission.
+- `host_tx_late_rejections` counts already-expired targets rejected by the UHD
+  adapter before submission. `uhd_tx_late_events` counts asynchronous UHD
+  time-error events. Their sum retains the existing `timed_transmit_late`
+  meaning. Scheduling deferrals remain `tdd_opportunities_missed`.
+
+Instrumentation performs additional clock reads and bounded locked updates.
+Compare identical short workloads with diagnostics off and on before using
+these measurements to justify optimizations. Keep final conclusions in
+`MODULATION_RESULTS.md`; temporary benchmark reports are disposable.
+
+### Shared-channel execution and decoder statistics
+
+The paired launcher retains one device owner and independent application, RX
+and decoder workers. Decoder processing p95/max remain exact statistics of the
+last 2,048 observations. The worker maintains a bounded sorted view alongside
+the arrival-order window, removing one expired value and inserting the new
+value under its existing state lock. Status reads no longer sort that history.
+This preserves duplicate values, rolling-window eviction and current counters;
+there is no cached/stale status interval or additional process/IPC path.
+See the Step 6 comparison in `MODULATION_RESULTS.md` for the CPU benefit and
+its conducted hardware scope.
+
+### Receive search scheduling
+
+The BPSK, 2FSK, MSK and GMSK receivers can search a live burst before its energy returns
+to idle. A plausible preamble/length schedules the next search when enough
+samples for that candidate, including the known receive shaping delay, exist.
+Payload validation is unchanged; a length field alone never delivers a packet.
+Without a usable length, live searches are spaced by at least 4 ms of new IQ
+or one larger read block, except that idle/full-buffer checks take priority.
+Timestamp discontinuities and reset clear pending search hints. The maximum
+buffer bound and search-before-trim protection for long tails remain in place.
+
+For BPSK, the required samples include the receive RRC filter tail when shaping
+is enabled, plus two symbols of lookahead during live reception. This lets
+neighboring timing candidates finish before an early alignment is declared
+corrupt. A continuous RX stream supplies that lookahead after the burst.
+Both PSK receivers consider distinct frames in arrival order and rank alignment
+quality within each frame, so a stronger later DATA frame cannot discard an
+earlier decodable ACK. QPSK retains its existing live-burst search scheduling.
+These receive-only changes do not alter transmitted samples, framing, profile identity or TDD
+policy. The 4,096-sample RX blocks and 256-block queue are unchanged: measured
+host queue residence did not justify a buffering-size change. Extra correlation
+work is a tradeoff, so assess end-to-end delivery latency and stream errors,
+not decoder-call duration alone. See Step 4 in `MODULATION_RESULTS.md`.
+
+### UHD transmit batching
+
+The default remains one transport packet per Python send call. Set
+`runtime.hardware_tx_batch_packets` in schema 2 (or
+`link.hardware_tx_batch_packets` in schema 1) to select bounded submissions at
+application startup; integer values 1..256 are accepted. The shared-device
+benchmark's `--tx-batch-packets` flag overrides this same host setting on both
+nodes. `actual_settings.tx_batch_packets` and `tx_batch_samples` report the
+configured count and sample limit. On the tested 1 Gb X310, 256 packets is
+93,184 samples instead of 364. UHD fragments each submission;
+the maximum transport packet size is not a maximum host-buffer size. This follows
+the installed UHD 4.9 header and the
+[UHD TX streamer contract](https://files.ettus.com/manual_archive/v4.9.0.0/html/classuhd_1_1tx__streamer.html).
+
+Partial acceptance advances by the returned sample count. The adapter keeps its
+owned IQ buffer alive, applies the timestamp/start flag only to the first accepted
+transfer, and attaches EOB to the final submission of data and existing idle
+samples. UHD applies EOB only to the final transport fragment; a partial return
+leaves that fragment unsent, so the remaining samples retain EOB on retry.
+This removes the Python scheduling gap between the last IQ and a separate end
+marker. Empty EOB is used only to clean up an interrupted/failed submission.
+Each batch rechecks the burst deadline. Because UHD's send timeout is per
+transport packet, the remaining timeout budget is divided by the number of
+fragments in that batch, capped at the existing 100 ms per-packet allowance.
+This limits blocking waits; it is not a hard real-time guarantee against host
+scheduling delays. Asynchronous completion and stream errors are still checked.
+
+Batching changes transport submission granularity, not waveform samples, bit
+rate, packet framing, RF gain or scheduled target time. It reduces Python call
+overhead; it does not eliminate time spent waiting for a timed burst or an ACK.
+The setting belongs to the host, not the portable emulated-radio definition;
+changing it does not change the profile identity. The supplied
+`configs/v1_1/peer-{a,b}-x310-qpsk.yaml` pair selects 256 packets with the existing
+unslotted QPSK profile. This cap fits the qualified ACK (7,936 samples), SYNC
+(8,448) and signed 1,024-byte DATA (72,960) in one Python-to-UHD call,
+avoiding Python scheduling gaps between their transport fragments. UHD still
+fragments internally. Other node examples and the B205 default stay at one.
+Use this pair for the conducted X310 QPSK setup; selecting QPSK in an older node
+file alone does not enable batching. This is a startup setting, not a live
+stream reconfiguration API. Keep it matched when comparing runs. See the QPSK
+underflow investigation in `MODULATION_RESULTS.md` for repeated workloads and
+limits. Step 2's historical timing failure remains recorded there; a scoped
+QPSK follow-up does not qualify every device, rate or profile for batching.
+
+```sh
+python tools/uhd_link_check.py --shared-device \
+  --profiles configs/v1_1/peer-a-x310-qpsk.yaml configs/v1_1/peer-b-x310-qpsk.yaml \
+  --duration 30 --timing-diagnostics
+```
+
+The paired application launcher accepts the same files and requires the usual
+authentication keys. The benchmark supplies temporary keys itself.
+
+### Timed-transmission preparation and recovery
+
+Relative targets are selected after the adapter copies/validates IQ and drains
+old asynchronous events. A single serialized device-time read then selects or
+checks the target. Explicit targets, including timestamps carried in sync
+packets, are preserved; an expired target is rejected before any sample is sent.
+
+The optional `link.hardware_min_tx_lead_seconds` also rejects a still-future
+target with insufficient remaining lead. The application requeues this unsent
+packet without counting a transmission failure or dropping simple-radio data.
+`tx_lead_rejections` counts adapter margin rejections, and `tx_lead_deferrals`
+counts application deferrals, including preflight checks. Actual expired-target
+rejections retain the existing host-late counter. A zero minimum preserves prior
+configuration behavior.
+
+Stale asynchronous reports are drained together, with a 256-event safety bound,
+before one aggregate failure is raised. Each UHD event is still counted. A
+fragmented failed burst therefore does not require one new application attempt
+per queued error. This does not identify every event as a separate failed burst.
+
+When diagnostics are enabled, `uhd_late_attempt_ms`,
+`uhd_underflow_attempt_ms` and `uhd_error_attempt_ms` summarize attempts that
+observe those failures; the corresponding `*_attempt_first_send_lead_ms`
+summarizes their first-submission lead. Delayed device reports can refer to an
+earlier physical transmission, so these metrics identify the observing attempt,
+not guaranteed one-to-one RF causality.
+
+The paired X310 BPSK diagnostic profiles use 10 ms data lead, 20 ms sync lead and
+2 ms minimum remaining lead. Run the default submission size with:
+
+```sh
+python tools/uhd_link_check.py --shared-device \
+  --profiles configs/bench/peer-a-x310-bpsk.yaml configs/bench/peer-b-x310-bpsk.yaml \
+  --duration 15 --timing-diagnostics
+```
+
+Add `--tx-batch-packets 16` only to repeat the historical batching comparison;
+the current qualified QPSK node examples select 256.
+Use the Python environment with the installed UHD bindings. These commands
+transmit RF and assume the documented crossed 30 dB attenuated bench connections.
+The profiles preserve the legacy reliable-link schedule, which still backlogs
+under the normal BPSK workload.
+
+### Unslotted reliable X310 pair
+
+`configs/v1_1/peer-a-x310-generic.yaml` and
+`configs/v1_1/peer-b-x310-generic.yaml` use explicit unslotted generic-v5 profiles.
+They keep authentication, replay/duplicate protection, one in-flight data packet
+per peer and bounded control traffic. They allow return ACKs as soon as decoding
+and channel checks permit them, without waiting for an alternating TDD window.
+Queue size remains 256; pending data expires after five seconds in these examples.
+
+This is a different scheduling policy, **not a compatible replacement for a
+half-duplex or TDD radio being emulated**. Measurements are limited to the crossed,
+attenuated TX/RX-to-other-RX2 setup, where both channels can transmit and receive.
+It does not establish single-antenna or over-the-air self-interference performance.
+
+With the X310 connected as documented, a short matched BPSK workload is:
+
+```sh
+python tools/uhd_link_check.py --shared-device \
+  --profiles configs/v1_1/peer-a-x310-generic.yaml configs/v1_1/peer-b-x310-generic.yaml \
+  --duration 30 --timing-diagnostics
+```
+
+The paired application launcher also accepts these profiles. It requires the
+configured authentication keys or the existing explicit isolated-bench opt-in;
+the benchmark generates temporary keys itself. The runtime submission default
+remains one transport packet per send. See `MODULATION_RESULTS.md` for exact
+delivery counts, queue expiration, latency and capacity limits.
+The portable profiles retain their `unqualified` labels: the Step 9 and PSK
+follow-up acceptance applies to the documented X310 host configurations and
+conducted workloads. It does not qualify those profiles on every device or
+establish target-radio interoperability. Complete delivery alone does not clear
+an observed UHD underflow.

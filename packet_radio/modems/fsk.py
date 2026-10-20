@@ -11,8 +11,6 @@ import math
 import numpy as np
 from reedsolo import ReedSolomonError
 
-from packet_radio.modems.fec import UncorrectableFECError
-
 from .base import StreamingModem
 
 
@@ -20,6 +18,9 @@ class FSK2Modem(StreamingModem):
     """Reuse bounded IQ buffering/timestamps and protection, with an FSK detector."""
 
     receive_delay_samples = 0
+    length_aware_live_search = True
+    discard_invalid_candidates = False
+    candidate_rejections = 0
 
     def __init__(self, samples_per_symbol=8, *, frequency_deviation_hz, **kwargs):
         super().__init__(samples_per_symbol, **kwargs)
@@ -34,8 +35,8 @@ class FSK2Modem(StreamingModem):
     def modulate(self, payload: bytes) -> np.ndarray:
         if len(payload) > self.max_frame:
             raise ValueError("frame exceeds modem limit")
-        wire = self.envelope.encode(self.protection.encode(payload))
-        bits = np.unpackbits(np.frombuffer(wire, dtype=np.uint8))
+        wire = self.processing.encode(payload)
+        bits = np.unpackbits(np.frombuffer(wire, dtype=np.uint8), bitorder=self.bit_order)
         tones = (bits.astype(np.float64) * 2 - 1) * self.frequency_deviation_hz
         increments = np.repeat(tones + self.carrier_offset_hz, self.sps)
         phase = np.cumsum(increments) * (2 * np.pi / self.sample_rate)
@@ -43,7 +44,7 @@ class FSK2Modem(StreamingModem):
 
     def _find_frame(self) -> tuple[bytes | None, int] | None:
         preamble = self._preamble_bits
-        minimum = len(preamble) + 16
+        minimum = len(preamble) + self.length_bits
         if len(self._samples) < minimum * self.sps:
             return None
         # A phase difference belongs to the later sample. Preserve sample indices
@@ -90,6 +91,8 @@ class FSK2Modem(StreamingModem):
             if not groups or candidate[0] - groups[-1][0][0] > self.sps * 2:
                 groups.append([])
             groups[-1].append(candidate)
+        rejected_end = None
+        rejected_groups = 0
         for group in groups:
             rejected = None
             failed = None
@@ -99,28 +102,36 @@ class FSK2Modem(StreamingModem):
             ):
                 bits = (symbols >= midpoint).astype(np.uint8)
                 length_start = start + len(preamble)
-                if len(bits) < length_start + 16:
+                if len(bits) < length_start + self.length_bits:
                     incomplete = True
                     continue
-                length = int.from_bytes(
-                    np.packbits(bits[length_start : length_start + 16]).tobytes(), "big"
-                )
+                length_field = np.packbits(
+                    bits[length_start : length_start + self.length_bits], bitorder=self.bit_order
+                ).tobytes()
+                try:
+                    length = self.envelope.body_size(length_field)
+                except ValueError:
+                    continue
                 if not 0 < length <= self.protection.encoded_size(self.max_frame):
                     continue
-                end = length_start + 16 + length * 8
+                end = length_start + self.length_bits + length * 8
+                consumed = timing + end * self.sps + self.receive_delay_samples
                 if len(bits) < end:
+                    self._await_frame_samples(consumed)
                     incomplete = True
                     continue
-                consumed = timing + end * self.sps + self.receive_delay_samples
                 if consumed > len(self._samples):
                     # The best complete payload candidate still needs its shaping
                     # tail. Do not accept an earlier, worse timing hypothesis just
                     # because its estimated end falls inside this receive block.
+                    self._await_frame_samples(consumed)
                     return None
-                encoded = np.packbits(bits[length_start + 16 : end]).tobytes()
+                encoded = np.packbits(
+                    bits[length_start + self.length_bits : end], bitorder=self.bit_order
+                ).tobytes()
                 try:
-                    result = self.protection.decode(encoded)
-                except (UncorrectableFECError, ReedSolomonError):
+                    result = self.processing.decode_body(length_field, encoded)
+                except (ValueError, ReedSolomonError):
                     failed = consumed
                     continue
                 if self.candidate_validator is not None and not self.candidate_validator(
@@ -129,19 +140,30 @@ class FSK2Modem(StreamingModem):
                     if rejected is None:
                         rejected = (result, consumed, frame_start)
                     continue
+                self.candidate_rejections += rejected_groups
                 self.fec_corrected_bits += result.corrected_bits
                 self._last_frame_start_sample = frame_start - self.receive_delay_samples
                 return result.payload, consumed
             if incomplete:
                 return None
+            if self.discard_invalid_candidates and rejected is not None:
+                # Continue searching later bursts before discarding damaged bytes.
+                # A corrupted length may otherwise consume a following valid burst.
+                rejected_groups += 1
+                rejected_end = rejected[1]
+                continue
             if rejected is not None:
                 result, consumed, frame_start = rejected
+                self.candidate_rejections += rejected_groups
                 self.fec_corrected_bits += result.corrected_bits
                 self._last_frame_start_sample = frame_start - self.receive_delay_samples
                 return result.payload, consumed
             if failed is not None:
                 self.fec_uncorrectable_frames += 1
                 return None, failed
+        if rejected_end is not None:
+            self.candidate_rejections += rejected_groups
+            return None, rejected_end
         return None
 
     def _fit_preamble(self, training, known):

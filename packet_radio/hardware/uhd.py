@@ -21,14 +21,20 @@ from typing import Any, Protocol
 import numpy as np
 
 from packet_radio.config import SDRConfig
+from packet_radio.diagnostics import TimingDiagnostics
 
 LOG = logging.getLogger(__name__)
+
+
+class TransmitDeadlineError(OSError):
+    """No IQ was submitted: the caller may safely requeue this packet."""
 
 
 @dataclass(frozen=True)
 class SampleBlock:
     samples: np.ndarray
     time_ns: int | None = None
+    buffered_at_monotonic: float | None = None
 
 
 def load_uhd() -> Any:
@@ -78,12 +84,72 @@ def validate_device_capabilities(
         ):
             limits = getattr(device, f"get_{direction}_{getter}")(config.channel)
             for value in values:
-                if not limits.start() <= value <= limits.stop():
+                fixed_filter = (
+                    name == "bandwidth"
+                    and limits.start() == limits.stop()
+                    and 0 < value <= limits.stop()
+                )
+                if not fixed_filter and not limits.start() <= value <= limits.stop():
                     raise ValueError(f"UHD {label} does not support configured {name} {value}")
         if antenna is not None and antenna not in getattr(device, f"get_{direction}_antennas")(
             config.channel
         ):
             raise ValueError(f"UHD {label} does not provide configured antenna {antenna}")
+
+
+class UHDDeviceSession:
+    """Own one multi-channel USRP and its clock for in-process radio endpoints.
+
+    Open channels serially before starting applications. All channel controls use
+    one lock; each channel retains independent RX/TX streamers. The session sets
+    UTC once, before streaming, so a peer can never reset a running board clock.
+    Close endpoints before closing the session.
+    """
+
+    def __init__(self, config: SDRConfig):
+        self.api = load_uhd()
+        self.arguments = dict(config.device)
+        self.sample_rate = config.sample_rate
+        self.lock = threading.RLock()
+        self.channels: set[int] = set()
+        self.device = make_uhd_device(
+            self.api,
+            config.device,
+            attempts=config.open_retry_attempts,
+            retry_seconds=config.open_retry_seconds,
+        )
+        if self.device.get_num_mboards() != 1:
+            self.device = None
+            raise ValueError("a shared UHD session requires exactly one motherboard")
+        seconds, remainder = divmod(time.time_ns(), 1_000_000_000)
+        self.device.set_time_now(self.api.types.TimeSpec(seconds, remainder / 1e9))
+
+    def open(
+        self, config: SDRConfig, frequencies_hz: Sequence[float] = (), *, tx_idle_samples: int = 0
+    ) -> UHDRadio:
+        with self.lock:
+            if self.device is None:
+                raise RuntimeError("shared UHD session is closed")
+            if config.device != self.arguments:
+                raise ValueError("shared channels must select the same UHD device")
+            if config.sample_rate != self.sample_rate:
+                raise ValueError("shared channels must use the same sample rate")
+            if config.channel in self.channels:
+                raise ValueError(f"UHD channel {config.channel} is already owned")
+            self.channels.add(config.channel)
+            try:
+                return UHDRadio(
+                    config, frequencies_hz, tx_idle_samples=tx_idle_samples, session=self
+                )
+            except BaseException:
+                self.channels.discard(config.channel)
+                raise
+
+    def close(self) -> None:
+        with self.lock:
+            if self.channels:
+                raise RuntimeError("close all radio channels before closing their UHD session")
+            self.device = None
 
 
 class Radio(Protocol):
@@ -115,28 +181,49 @@ class UHDRadio:
         "rx_stream_errors",
         "timed_transmissions",
         "timed_transmit_late",
+        "host_tx_late_rejections",
+        "tx_lead_rejections",
+        "uhd_tx_late_events",
         "timed_receive_windows",
         "tx_underflows",
         "tx_stream_errors",
         "tx_timeouts",
     )
 
-    def __init__(self, config: SDRConfig, frequencies_hz: Sequence[float] = ()):
-        self.api = load_uhd()
+    def __init__(
+        self,
+        config: SDRConfig,
+        frequencies_hz: Sequence[float] = (),
+        *,
+        tx_idle_samples: int = 0,
+        session: UHDDeviceSession | None = None,
+    ):
+        if type(tx_idle_samples) is not int or not 0 <= tx_idle_samples <= 4096:
+            raise ValueError("tx_idle_samples must be an integer in 0..4096")
+        self.timing = TimingDiagnostics()
+        self.tx_idle_samples = tx_idle_samples
+        self.minimum_tx_lead_ns = 0
+        self.session = session
+        self.hardware_epoch_initialized = session is not None
+        self.api = session.api if session is not None else load_uhd()
         self.config = config
         self.device: Any = None
         self.rx_stream: Any = None
         self.tx_stream: Any = None
         self.rx_active = False
-        self._control_lock = threading.RLock()
+        self._control_lock = session.lock if session is not None else threading.RLock()
         self._counters = dict.fromkeys(self.COUNTERS, 0)
-        self.actual_settings: dict[str, Any] = {}
+        self.actual_settings: dict[str, Any] = {"tx_idle_samples": tx_idle_samples}
         try:
-            self.device = make_uhd_device(
-                self.api,
-                config.device,
-                attempts=config.open_retry_attempts,
-                retry_seconds=config.open_retry_seconds,
+            self.device = (
+                session.device
+                if session is not None
+                else make_uhd_device(
+                    self.api,
+                    config.device,
+                    attempts=config.open_retry_attempts,
+                    retry_seconds=config.open_retry_seconds,
+                )
             )
             validate_device_capabilities(self.device, config, frequencies_hz)
             self.actual_settings["device"] = self.device.get_usrp_rx_info(config.channel)
@@ -149,7 +236,15 @@ class UHDRadio:
                     ("bandwidth", config.bandwidth),
                     ("gain", gain),
                 ):
-                    getattr(self.device, f"set_{direction}_{name}")(requested, config.channel)
+                    target = requested
+                    if name == "bandwidth":
+                        limits = getattr(self.device, f"get_{direction}_bandwidth_range")(
+                            config.channel
+                        )
+                        if limits.start() == limits.stop():
+                            target = float(limits.start())
+                        self.actual_settings[f"{direction}_requested_bandwidth"] = requested
+                    getattr(self.device, f"set_{direction}_{name}")(target, config.channel)
                     actual = float(getattr(self.device, f"get_{direction}_{name}")(config.channel))
                     self.actual_settings[f"{direction}_{name}"] = actual
                     if name == "rate" and not math.isclose(actual, requested, rel_tol=1e-6):
@@ -181,6 +276,10 @@ class UHDRadio:
             self.tx_mtu = int(self.tx_stream.get_max_num_samps())
             if self.tx_mtu <= 0:
                 raise RuntimeError("UHD returned an invalid TX buffer size")
+            # get_max_num_samps is a transport packet size, not a send limit.
+            # Preserve the default; applications may explicitly configure batching
+            # before any TX starts, without changing samples or burst boundaries.
+            self.set_tx_batch_packets(1)
             # Initialize UHD's lazy NumPy bridge on this thread. Concurrent first
             # send/recv calls can deadlock in extension/import initialization.
             # No stream is active yet and this zero-timeout read cannot transmit.
@@ -196,18 +295,20 @@ class UHDRadio:
         return self.api.types.TimeSpec(seconds, remainder / 1e9)
 
     def hardware_time(self) -> int:
-        with self._control_lock:
+        with self.timing.lock("uhd_control", self._control_lock):
             return int(self.device.get_time_now().to_ticks(1e9))
 
     def set_hardware_time(self, time_ns: int) -> None:
-        with self._control_lock:
+        with self.timing.lock("uhd_control", self._control_lock):
+            if self.session is not None:
+                raise RuntimeError("a shared UHD clock cannot be reset by a channel")
             # Stop old-epoch samples before resetting the clock.
             self._stop_receive()
             self.device.set_time_now(self._time_spec(time_ns))
             self._start_receive()
 
     def tune(self, frequency_hz: float) -> None:
-        with self._control_lock:
+        with self.timing.lock("uhd_control", self._control_lock):
             validate_device_capabilities(self.device, self.config, (frequency_hz,))
             was_active = self.rx_active
             if was_active:
@@ -233,36 +334,72 @@ class UHDRadio:
     def transmit(self, samples: np.ndarray) -> None:
         self._transmit(samples, None)
 
+    def set_tx_batch_packets(self, packets: int) -> None:
+        """Configure bounded host submissions before starting the TX owner."""
+        if type(packets) is not int or not 1 <= packets <= 256:
+            raise ValueError("TX batch packets must be an integer in 1..256")
+        self.tx_batch_samples = packets * self.tx_mtu
+        self.actual_settings["tx_batch_packets"] = packets
+        self.actual_settings["tx_batch_samples"] = self.tx_batch_samples
+
     def transmit_at(self, samples: np.ndarray, time_ns: int) -> None:
-        if time_ns <= self.hardware_time():
-            self._counters["timed_transmit_late"] += 1
-            raise OSError("timed transmit is late")
         self._transmit(samples, int(time_ns))
 
     def transmit_with_lead(self, samples: np.ndarray, lead_ns: int) -> int:
-        target = self.hardware_time() + int(lead_ns)
-        self.transmit_at(samples, target)
+        if lead_ns <= 0:
+            raise ValueError("timed transmit lead must be positive")
+        target = self._transmit(samples, None, lead_ns=int(lead_ns))
+        assert target is not None
         return target
+
+    def _drain_tx_events(self) -> None:
+        """Report stale errors together so one burst cannot poison many retries."""
+        failure = None
+        for _ in range(256):
+            metadata = self.api.types.TXAsyncMetadata()
+            if not self.tx_stream.recv_async_msg(metadata, 0.0):
+                break
+            try:
+                self._check_tx_event(metadata.event_code)
+            except OSError as exc:
+                failure = exc
+        else:
+            raise OSError("UHD async event queue did not drain")
+        if failure is not None:
+            raise failure
 
     def _end_burst(self) -> None:
         metadata = self.api.types.TXMetadata()
         metadata.end_of_burst = True
         self.tx_stream.send(np.empty((1, 0), np.complex64), metadata, 0.1)
 
-    def _transmit(self, samples: np.ndarray, time_ns: int | None) -> None:
+    def _transmit(
+        self, samples: np.ndarray, time_ns: int | None, *, lead_ns: int | None = None
+    ) -> int | None:
         # Copy even contiguous inputs: UHD releases the GIL while accessing memory.
         samples = np.array(samples, dtype=np.complex64, copy=True)
         if samples.ndim != 1 or not samples.size or not np.isfinite(samples).all():
             raise ValueError("TX requires a nonempty finite one-dimensional sample array")
+        # Transport zero-valued idle after the logical waveform so UHD's TX filter
+        # pipeline can drain before EOB. No extra symbols or packet bytes are added.
+        if self.tx_idle_samples:
+            samples = np.concatenate((samples, np.zeros(self.tx_idle_samples, np.complex64)))
         async_metadata = self.api.types.TXAsyncMetadata()
-        # Old asynchronous reports cannot acknowledge this burst.
-        for _ in range(64):
-            if not self.tx_stream.recv_async_msg(async_metadata, 0.0):
-                break
-            self._check_tx_event(async_metadata.event_code)
-        else:
-            raise OSError("UHD async event queue did not drain")
-        lead = 0 if time_ns is None else max(0, (time_ns - self.hardware_time()) / 1e9)
+        # Complete preparation and stale-event handling before choosing a
+        # relative target. One serialized device-time read selects/checks it.
+        self._drain_tx_events()
+        now_ns = self.hardware_time() if time_ns is not None or lead_ns is not None else 0
+        if lead_ns is not None:
+            time_ns = now_ns + lead_ns
+        if time_ns is not None and time_ns <= now_ns:
+            self._counters["timed_transmit_late"] += 1
+            self._counters["host_tx_late_rejections"] += 1
+            raise TransmitDeadlineError("timed transmit is late")
+        if time_ns is not None and time_ns - now_ns < self.minimum_tx_lead_ns:
+            self._counters["tx_lead_rejections"] += 1
+            self.timing.observe("rejected_tx_hardware_lead_ms", (time_ns - now_ns) / 1e6)
+            raise TransmitDeadlineError("timed transmit has insufficient submission lead")
+        lead = 0 if time_ns is None else (time_ns - now_ns) / 1e9
         deadline = time.monotonic() + lead + len(samples) / self.config.sample_rate + 1.0
         metadata = self.api.types.TXMetadata()
         metadata.start_of_burst = True
@@ -270,6 +407,11 @@ class UHDRadio:
         if time_ns is not None:
             metadata.time_spec = self._time_spec(time_ns)
         ended = False
+        submission_started = self.timing.start()
+        send_calls = 0
+        first_lead_ms = None
+        late_before = self._counters["uhd_tx_late_events"]
+        underflow_before = self._counters["tx_underflows"]
         try:
             position = 0
             while position < len(samples):
@@ -277,29 +419,61 @@ class UHDRadio:
                 if remaining <= 0:
                     self._counters["tx_timeouts"] += 1
                     raise OSError("UHD TX send deadline expired")
-                chunk = samples[position : position + self.tx_mtu].reshape(1, -1)
-                sent = int(self.tx_stream.send(chunk, metadata, min(remaining, 0.1)))
+                chunk = samples[position : position + self.tx_batch_samples].reshape(1, -1)
+                if self.timing.enabled and position == 0 and time_ns is not None:
+                    first_lead_ms = (time_ns - self.hardware_time()) / 1e6
+                    self.timing.observe("first_send_hardware_lead_ms", first_lead_ms)
+                # UHD applies EOB only to the final transport fragment of a
+                # fully accepted send. A partial return has not sent that
+                # fragment, so the remainder can safely retain EOB. Submit the
+                # marker with the IQ: returning to Python for a separate EOB
+                # leaves a starvation window after the last sample.
+                metadata.end_of_burst = position + chunk.size == len(samples)
+                call_started = self.timing.start()
+                # UHD's timeout applies per transport packet. Divide the
+                # remaining budget so fragmentation cannot multiply that budget.
+                fragments = (chunk.size + self.tx_mtu - 1) // self.tx_mtu
+                sent = int(self.tx_stream.send(chunk, metadata, min(remaining / fragments, 0.1)))
+                send_calls += 1
+                self.timing.finish("uhd_send_call_ms", call_started)
+                self.timing.observe("uhd_send_requested_samples", float(chunk.size))
+                self.timing.observe("uhd_send_accepted_samples", float(sent))
                 if not 0 < sent <= chunk.size:
                     self._counters["tx_timeouts" if sent == 0 else "tx_stream_errors"] += 1
                     raise OSError(f"UHD TX incomplete transfer: {sent}/{chunk.size}")
                 position += sent
+                ended = position == len(samples)
                 metadata.start_of_burst = False
                 metadata.has_time_spec = False
-            # A separate zero-sample EOB avoids ending a partially accepted final chunk.
-            self._end_burst()
-            ended = True
+            self.timing.finish("uhd_submission_ms", submission_started)
+            completion_started = self.timing.start()
             while time.monotonic() < deadline:
                 if self.tx_stream.recv_async_msg(
                     async_metadata, min(0.1, max(0, deadline - time.monotonic()))
                 ):
                     self._check_tx_event(async_metadata.event_code)
                     if async_metadata.event_code == self.api.types.TXMetadataEventCode.burst_ack:
+                        self.timing.finish("uhd_completion_wait_ms", completion_started)
+                        self.timing.finish("uhd_burst_total_ms", submission_started)
                         if time_ns is not None:
                             self._counters["timed_transmissions"] += 1
-                        return
+                        return time_ns
             self._counters["tx_timeouts"] += 1
             raise OSError("UHD TX burst completion timed out")
+        except OSError:
+            cause = (
+                "late"
+                if self._counters["uhd_tx_late_events"] > late_before
+                else "underflow"
+                if self._counters["tx_underflows"] > underflow_before
+                else "error"
+            )
+            self.timing.finish(f"uhd_{cause}_attempt_ms", submission_started)
+            if first_lead_ms is not None:
+                self.timing.observe(f"uhd_{cause}_attempt_first_send_lead_ms", first_lead_ms)
+            raise
         finally:
+            self.timing.observe("uhd_send_calls_per_attempt", float(send_calls))
             if not ended:
                 self._end_burst()
 
@@ -310,6 +484,7 @@ class UHDRadio:
         if event in (codes.underflow, codes.underflow_in_packet):
             counter = "tx_underflows"
         elif event == codes.time_error:
+            self._counters["uhd_tx_late_events"] += 1
             counter = "timed_transmit_late"
         else:
             counter = "tx_stream_errors"
@@ -383,12 +558,17 @@ class UHDRadio:
 
     def close(self) -> None:
         try:
-            self._stop_receive()
+            with self.timing.lock("uhd_control", self._control_lock):
+                self._stop_receive()
         finally:
             # UHD streamers and MultiUSRP release their resources through reference ownership.
             self.rx_stream = None
             self.tx_stream = None
             self.device = None
+            if self.session is not None:
+                with self.timing.lock("uhd_control", self._control_lock):
+                    self.session.channels.discard(self.config.channel)
+                    self.session = None
 
 
 class BufferedRadio:
@@ -406,6 +586,7 @@ class BufferedRadio:
             raise ValueError("buffer dimensions and read timeout must be positive")
         self.radio = radio
         self.block_size = block_size
+        self.timing = TimingDiagnostics()
         self.read_timeout_us = read_timeout_us
         self._queue: queue.Queue[SampleBlock] = queue.Queue(queue_blocks)
         self._io_lock = threading.Lock()
@@ -428,7 +609,7 @@ class BufferedRadio:
                 if self._paused.is_set():
                     time.sleep(0.0005)
                     continue
-                with self._io_lock:
+                with self.timing.lock("rx_io", self._io_lock), self.timing.work("rx_worker"):
                     timed_receive = getattr(self.radio, "receive_timed", None)
                     if timed_receive is None:
                         samples = self.radio.receive(self.block_size, self.read_timeout_us)
@@ -438,7 +619,9 @@ class BufferedRadio:
                     if not len(received.samples):
                         continue
                     block = SampleBlock(
-                        np.asarray(received.samples, dtype=np.complex64).copy(), received.time_ns
+                        np.asarray(received.samples, dtype=np.complex64).copy(),
+                        received.time_ns,
+                        self.timing.start(),
                     )
                     try:
                         self._queue.put_nowait(block)
@@ -549,7 +732,11 @@ class BufferedRadio:
         if self._error is not None:
             raise RuntimeError("SDR receive thread failed") from self._error
         try:
-            return self._queue.get(timeout=min(timeout_us / 1_000_000, 0.01))
+            block = self._queue.get(timeout=min(timeout_us / 1_000_000, 0.01))
+            self.timing.finish("rx_buffer_queue_ms", block.buffered_at_monotonic)
+            if self.timing.enabled:
+                self.timing.observe("rx_buffer_queue_blocks", self._queue.qsize())
+            return block
         except queue.Empty:
             return SampleBlock(np.empty(0, dtype=np.complex64))
 

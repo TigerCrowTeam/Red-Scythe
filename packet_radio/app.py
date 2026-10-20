@@ -12,9 +12,9 @@ from __future__ import annotations
 import logging
 import math
 import signal
-import struct
 import threading
 import time
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -24,37 +24,41 @@ from packet_radio.config import RadioConfig, configuration_snapshot, validate_co
 from packet_radio.endpoint import PayloadEndpoint, UDPEndpoint
 from packet_radio.hardware.uhd import BufferedRadio, UHDRadio
 from packet_radio.modems.decoder import DecoderWorker
-from packet_radio.modems.registry import make_modem
 from packet_radio.protocol.authentication import (
     load_private_key,
     load_public_keys,
     public_key_fingerprint,
 )
-from packet_radio.protocol.framing import (
-    BROADCAST_ID,
-    PacketKind,
-    RadioPacket,
-    has_valid_crc,
-)
-from packet_radio.protocol.reliability import QueuedPacket, ReliableLink
-from packet_radio.protocol.replay_protection import ReplayProtector
+from packet_radio.protocol.interfaces import QueuedPacket
+from packet_radio.protocol.registry import ProcessingProfile, resolve_processing
 from packet_radio.recording import CaptureRecorder
 from packet_radio.scheduler import FrequencyScheduler
 from packet_radio.statistics import LinkStatistics
 from packet_radio.status import StatusService
 
+if TYPE_CHECKING:
+    from packet_radio.protocol.replay_protection import ReplayProtector
+
 LOG = logging.getLogger(__name__)
 
 
 class RadioApp:
+    # State initialized by the selected behavior; retained here for timing tools.
+    session_id: int
+    replay_protector: ReplayProtector
+    last_sync_leader_time: float | None
+    last_sync_received_at: float | None
+
     def __init__(
         self,
         config: RadioConfig,
         *,
         sdr=None,
         endpoint: PayloadEndpoint | None = None,
+        processing: ProcessingProfile | None = None,
         wall_clock=time.time,
         monotonic_clock=time.monotonic,
+        timing_diagnostics: bool = False,
     ):
         self.status_service: StatusService | None = None
         self.recorder: CaptureRecorder | None = None
@@ -64,8 +68,10 @@ class RadioApp:
                 config,
                 sdr=sdr,
                 endpoint=endpoint,
+                processing=processing,
                 wall_clock=wall_clock,
                 monotonic_clock=monotonic_clock,
+                timing_diagnostics=timing_diagnostics,
             )
             self.statistics.set_gauge("radio_ready", True)
         except BaseException:
@@ -78,10 +84,12 @@ class RadioApp:
         *,
         sdr=None,
         endpoint: PayloadEndpoint | None = None,
+        processing: ProcessingProfile | None = None,
         wall_clock=time.time,
         monotonic_clock=time.monotonic,
+        timing_diagnostics: bool = False,
     ):
-        validate_config(config)
+        validate_config(config, processing=processing)
         self.config = config
         self.signing_key = (
             load_private_key(config.authentication.private_key_file)
@@ -103,36 +111,61 @@ class RadioApp:
                     node_id,
                     ", ".join(public_key_fingerprint(key) for key in keys),
                 )
-        self.session_id = transmission.new_session_id() or 1
-        self.replay_protector = ReplayProtector(
-            config.authentication.replay_window,
-            config.authentication.replay_state_file,
-        )
-        self.last_sync_leader_time: float | None = None
-        self.last_sync_received_at: float | None = None
+        self.processing = processing or resolve_processing(config)
+        self.codec = self.processing.codec
+        self.behavior = self.processing.behavior
+        self.behavior.initialize(self)
         self.wall_clock = wall_clock
         self.monotonic_clock = monotonic_clock
         self.scheduler = FrequencyScheduler(config.frequency, clock=wall_clock)
-        self.modem = make_modem(config.sdr, candidate_validator=has_valid_crc)
+        self.modem = self.processing.make_modem(config.sdr, clock=monotonic_clock)
         self.rx_modem = (
-            make_modem(config.sdr, candidate_validator=has_valid_crc)
+            self.processing.make_modem(config.sdr, clock=monotonic_clock)
             if config.sdr.decoder_worker_enabled
             else self.modem
         )
         self.sdr = sdr
         if self.sdr is None:
-            self.sdr = BufferedRadio(UHDRadio(config.sdr, config.frequency.frequencies_hz))
+            self.sdr = BufferedRadio(
+                UHDRadio(
+                    config.sdr,
+                    config.frequency.frequencies_hz,
+                    tx_idle_samples=self.processing.tx_idle_samples(config.sdr),
+                )
+            )
         self.hardware_clock_sync = HardwareClockSynchronizer()
         if config.link.hardware_clock_sync:
             self._initialize_hardware_epoch()
         self.endpoint = endpoint if endpoint is not None else UDPEndpoint(config.endpoint)
-        self.statistics = LinkStatistics(monotonic_clock, config.frequency.sync_loss_seconds)
+        self.statistics = LinkStatistics(
+            monotonic_clock,
+            config.frequency.sync_loss_seconds,
+            timing_diagnostics=timing_diagnostics,
+        )
         backend = getattr(self.sdr, "radio", self.sdr)
+        if isinstance(self.sdr, BufferedRadio):
+            self.sdr.timing = self.statistics.timing
+        self.rx_modem.timing = self.statistics.timing
+        if hasattr(backend, "timing"):
+            backend.timing = self.statistics.timing
+        if hasattr(backend, "minimum_tx_lead_ns"):
+            backend.minimum_tx_lead_ns = int(config.link.hardware_min_tx_lead_seconds * 1e9)
+        configure_batch = getattr(backend, "set_tx_batch_packets", None)
+        if configure_batch is not None:
+            configure_batch(config.link.hardware_tx_batch_packets)
         actual = getattr(backend, "actual_settings", {})
+        snapshot = configuration_snapshot(config)
+        snapshot["packet_format"] = self.processing.name
+        snapshot["processing"] = self.processing.describe()
         self.statistics.set_radio_info(
-            configuration_snapshot(config),
+            snapshot,
             {"actual_settings": actual if isinstance(actual, dict) else {}},
         )
+        self.statistics.set_gauge("requires_peer", self.behavior.requires_peer)
+        self.statistics.set_gauge("operation", self.behavior.operation)
+        self.statistics.set_gauge("input_kind", self.behavior.input_kind)
+        if not self.behavior.requires_peer:
+            self.statistics.set_gauge("synchronized", None)
         self.statistics.set_gauge("queue_capacity", config.link.queue_size)
         self.statistics.set_gauge("modulation", config.sdr.modulation)
         self.statistics.set_gauge("configured_bit_rate_bps", config.sdr.bit_rate_bps)
@@ -140,21 +173,15 @@ class RadioApp:
             "configured_center_frequency_hz", config.frequency.frequencies_hz[0]
         )
         self.statistics.set_gauge("sample_rate_hz", config.sdr.sample_rate)
-        self.link = ReliableLink(
-            config.node_id,
-            config.link,
-            clock=monotonic_clock,
-            statistics=self.statistics,
-            session_id=self.session_id,
-            encoded_size=self._on_air_size,
-            airtime=self._packet_airtime,
-        )
+        self.link = self.behavior.make_link(self)
         self._prepared_burst: tuple[QueuedPacket, bytes, np.ndarray] | None = None
         self.sequence = 0
         self.running = threading.Event()
         self.running.set()
         self.last_rx = self.monotonic_clock()
         self.current_frequency: float | None = None
+        self._hop_slot: int | None = None
+        self._hop_ready_at = 0.0
         self.channel_power = 0.0
         self._receive_diagnostics: dict[str, int] = {}
         self.recovering = False
@@ -172,6 +199,7 @@ class RadioApp:
             try:
                 self.recorder = CaptureRecorder(
                     config.recording.directory,
+                    resolved_configuration=configuration_snapshot(config),
                     sample_rate=config.sdr.sample_rate,
                     center_frequency_hz=config.frequency.frequencies_hz[0],
                     samples_per_symbol=config.sdr.samples_per_symbol,
@@ -197,22 +225,18 @@ class RadioApp:
             except (OSError, ValueError) as exc:
                 LOG.error("capture recording unavailable; continuing without it: %s", exc)
                 self.statistics.increment("recording_failures")
-        if config.sdr.decoder_worker_enabled:
+        if config.sdr.decoder_worker_enabled and self.behavior.receive_enabled:
             self.decoder_worker = DecoderWorker(
                 self.sdr,
                 self.rx_modem,
                 sample_rate=config.sdr.sample_rate,
                 output_batches=config.sdr.decoder_output_batches,
+                timing=self.statistics.timing,
                 record_iq=(self.recorder.record_iq if self.recorder is not None else None),
             )
 
-    def _queue(
-        self, payload: bytes, destination: int, *, kind: PacketKind = PacketKind.DATA
-    ) -> bool:
-        packet = RadioPacket(
-            self.config.node_id, destination, self.sequence, payload, kind, self.session_id
-        )
-        return self.link.enqueue(packet)
+    def _queue(self, payload: bytes, destination: int, *, kind=None) -> bool:
+        return self.behavior.queue(self, payload, destination, kind)
 
     def _transmit_one(self) -> None:
         return transmission.transmit_one(self)
@@ -236,6 +260,10 @@ class RadioApp:
 
     def _initialize_hardware_epoch(self) -> None:
         """Set device time to a shared future UTC whole-second epoch."""
+        backend = getattr(self.sdr, "radio", self.sdr)
+        if getattr(backend, "hardware_epoch_initialized", False):
+            LOG.info("using the shared UHD session clock")
+            return
         target_ns = int(
             math.ceil(self.wall_clock() + self.config.link.hardware_epoch_lead_seconds) * 1e9
         )
@@ -256,13 +284,41 @@ class RadioApp:
         if self.recovering:
             return
         state = self.scheduler.state()
+        hopping = len(self.config.frequency.frequencies_hz) > 1
+        if hopping and self._hop_slot is not None and state.slot != self._hop_slot:
+            if state.slot > self._hop_slot + 1:
+                self.statistics.increment("hop_slots_missed", state.slot - self._hop_slot - 1)
+            elif state.slot < self._hop_slot:
+                self.statistics.increment("hop_clock_reversals")
+        slot_changed = self._hop_slot != state.slot
+        self._hop_slot = state.slot
         wanted = state.frequency_hz
-        if wanted != self.current_frequency:
+        if wanted != self.current_frequency or (hopping and slot_changed):
             previous = self.current_frequency
-            self.sdr.tune(wanted)
-            flush = getattr(self.sdr, "flush_receive", None)
-            if flush is not None:
-                flush()
+            started = self.monotonic_clock()
+
+            def tune():
+                self.sdr.tune(wanted)
+                flush = getattr(self.sdr, "flush_receive", None)
+                if flush is not None:
+                    flush()
+
+            settle = self.config.frequency.guard_seconds if hopping else 0.0
+            if hopping and self.decoder_worker is not None:
+                self.decoder_worker.retune(tune, settle)
+            else:
+                tune()
+                if hopping:
+                    self.rx_modem.reset()
+            self._hop_ready_at = self.monotonic_clock() + settle
+            elapsed = self.monotonic_clock() - started
+            self.statistics.set_gauge("hop_retune_ms", elapsed * 1000)
+            if hopping:
+                finished = self.scheduler.state()
+                phase = self.config.frequency.interval_seconds - finished.seconds_to_change
+                if finished.slot != state.slot or phase > self.config.frequency.guard_seconds:
+                    self.statistics.increment("hop_tune_deadlines_missed")
+                self._prepared_burst = None
             self.current_frequency = wanted
             self.statistics.set_gauge("active_frequency_hz", wanted)
             if previous is not None:
@@ -270,83 +326,74 @@ class RadioApp:
                 self._last_tdd_opportunity_id = None
                 LOG.info("frequency hop %.3f MHz -> %.3f MHz", previous / 1e6, wanted / 1e6)
 
-    def _packet_airtime(self, packet: RadioPacket) -> float:
-        size = packet.encoded_size(authenticated=self.signing_key is not None)
+    def _packet_airtime(self, packet) -> float:
+        size = self.codec.encoded_size(packet, authenticated=self.signing_key is not None)
         return self.modem.sample_count(size) / self.config.sdr.sample_rate
 
-    def _on_air_size(self, packet: RadioPacket) -> int:
-        framed = packet.encoded_size(authenticated=self.signing_key is not None)
+    def _on_air_size(self, packet) -> int:
+        framed = self.codec.encoded_size(packet, authenticated=self.signing_key is not None)
         return self.modem.frame_size(framed)
 
     def _recover_if_needed(self) -> None:
-        if self.config.timing_role == "leader":
-            return
-        now = self.monotonic_clock()
-        if not self.recovering:
-            if now - self.last_rx < self.config.frequency.sync_loss_seconds:
-                return
-            LOG.warning("radio synchronization lost; beginning channel scan")
-            self.statistics.increment("synchronization_losses")
-            self.statistics.set_gauge("synchronized", False)
-            self.recovering = True
-            self.scan_frequencies = self.scheduler.scan_order()
-            self.scan_index = 0
-            self.next_scan_at = 0.0
-        if now >= self.next_scan_at:
-            frequency = self.scan_frequencies[self.scan_index]
-            self.scan_index = (self.scan_index + 1) % len(self.scan_frequencies)
-            self.sdr.tune(frequency)
-            self.current_frequency = frequency
-            self.statistics.set_gauge("active_frequency_hz", frequency)
-            self.next_scan_at = now + self.config.frequency.reacquire_dwell_seconds
+        self.behavior.recover(self)
 
     def _receive_radio(self) -> bool:
         return reception.receive_radio(self)
 
     def _sync_is_fresh(self, leader_time: float, received_at: float) -> bool:
-        return reception.sync_is_fresh(self, leader_time, received_at)
+        return self.behavior.sync_is_fresh(self, leader_time, received_at)
 
     def _queue_clock_sync(self) -> None:
-        now = self.monotonic_clock()
-        if self.config.timing_role == "leader" and now >= self.next_sync_at:
-            self._queue(struct.pack("!d", self.wall_clock()), BROADCAST_ID, kind=PacketKind.SYNC)
-            self.next_sync_at = now + 2.0
+        self.behavior.tick(self)
 
     def _queue_local_payload(self, payload: bytes) -> bool:
         self.statistics.increment("payload_packets_received")
         self.statistics.increment("payload_bytes_received", len(payload))
-        if not 1 <= len(payload) <= self.config.endpoint.max_payload_bytes:
+        limit = self.behavior.input_limit(self)
+        if not 1 <= len(payload) <= limit:
             self.statistics.increment("invalid_payloads")
             LOG.warning(
                 "rejected local payload length %d (allowed 1..%d)",
                 len(payload),
-                self.config.endpoint.max_payload_bytes,
+                limit,
             )
             return False
-        return self._queue(payload, self.config.peer_id)
+        started = self.statistics.timing.start()
+        accepted = self._queue(payload, self.config.peer_id)
+        self.statistics.timing.finish("payload_enqueue_ms", started)
+        return accepted
 
     def step(self) -> None:
         """Run one application cycle, with bounded nonblocking endpoint polling."""
-        self._retune()
-        self._receive_radio()
-        for _ in range(self.config.endpoint.drain_max_packets):
-            try:
-                payload = self.endpoint.receive()
-            except OSError as exc:
-                self.statistics.increment("endpoint_input_errors")
-                LOG.warning("local payload input failed: %s", exc)
-                break
-            if payload is None:
-                break
-            self._queue_local_payload(payload)
-        self._queue_clock_sync()
-        self._transmit_one()
-        self._recover_if_needed()
-        state = self.scheduler.state()
-        self.statistics.set_gauge("frequency_slot", state.slot)
-        self.statistics.set_gauge("transmit_allowed", state.transmit_allowed)
-        if self.status_service is not None:
-            self.status_service.maybe_report()
+        with self.statistics.timing.work("app_step"):
+            self._retune()
+            self._receive_radio()
+            for _ in range(self.config.endpoint.drain_max_packets):
+                try:
+                    payload = self.endpoint.receive()
+                except OSError as exc:
+                    self.statistics.increment("endpoint_input_errors")
+                    LOG.warning("local payload input failed: %s", exc)
+                    break
+                if payload is None:
+                    break
+                self._queue_local_payload(payload)
+            self._queue_clock_sync()
+            self._transmit_one()
+            self._recover_if_needed()
+            state = self.scheduler.state()
+            self.statistics.set_gauge("frequency_slot", state.slot)
+            self.statistics.set_gauge(
+                "transmit_allowed",
+                state.transmit_allowed
+                and self.behavior.transmit_allowed(self)
+                and (
+                    len(self.config.frequency.frequencies_hz) == 1
+                    or self.monotonic_clock() >= self._hop_ready_at
+                ),
+            )
+            if self.status_service is not None:
+                self.status_service.maybe_report()
 
     def run(self) -> None:
         LOG.info("starting %s node %d", self.config.timing_role, self.config.node_id)
@@ -390,8 +437,8 @@ class RadioApp:
         self.running.clear()
 
 
-def run(config: RadioConfig) -> None:
-    app = RadioApp(config)
+def run(config: RadioConfig, *, timing_diagnostics: bool = False) -> None:
+    app = RadioApp(config, timing_diagnostics=timing_diagnostics)
     signal.signal(signal.SIGINT, app.stop)
     signal.signal(signal.SIGTERM, app.stop)
     app.run()

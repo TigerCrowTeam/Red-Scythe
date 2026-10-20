@@ -1,0 +1,29 @@
+schema_version: 2
+profile: ../profiles/simple-2fsk-x310-hopping-v1.yaml
+node_id: 1
+peer_id: 2
+timing_role: leader
+operation: bidirectional
+input_kind: payload
+hardware:
+  device:
+    type: x300
+    addr: 192.168.10.2
+  tx_gain: 0
+  rx_gain: 0
+  tx_antenna: TX/RX
+  rx_antenna: RX2
+  channel: 0
+runtime:
+  decoder_worker_enabled: true
+  hardware_timed_io: true
+  hardware_timed_tx_lead_seconds: 0.01
+  queue_size: 256
+endpoint:
+  bind_host: 127.0.0.1
+  bind_port: 50000
+  destination_host: 127.0.0.1
+  destination_port: 50001
+status:
+  output: text
+  http_port: 8765

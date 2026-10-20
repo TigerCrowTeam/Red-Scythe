@@ -10,7 +10,13 @@ import argparse
 import json
 
 from packet_radio.protocol.authentication import load_public_keys
-from packet_radio.recording import describe_frames, load_manifest, replay_frames, replay_iq
+from packet_radio.recording import (
+    describe_frames,
+    load_manifest,
+    manifest_processing,
+    replay_frames,
+    replay_iq,
+)
 
 
 def main() -> None:
@@ -42,7 +48,7 @@ def main() -> None:
             raise ValueError("authenticated capture requires --public-key")
         keys = load_public_keys(paths) if paths else None
         wires = replay_iq(args.capture) if args.source == "iq" else replay_frames(args.capture)
-        for result in describe_frames(wires, keys):
+        for result in describe_frames(wires, keys, processing=manifest_processing(manifest)):
             print(json.dumps(result, separators=(",", ":")))
     except ValueError as exc:
         parser.exit(1, f"packet-radio-replay: {exc}\n")

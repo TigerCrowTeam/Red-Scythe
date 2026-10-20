@@ -53,7 +53,7 @@ class GMSKModem(MSKModem):
     def modulate(self, payload: bytes) -> np.ndarray:
         if len(payload) > self.max_frame:
             raise ValueError("frame exceeds modem limit")
-        wire = self.envelope.encode(self.protection.encode(payload))
+        wire = self.processing.encode(payload)
         signs = np.unpackbits(np.frombuffer(wire, dtype=np.uint8)).astype(float) * 2 - 1
         shaped = np.convolve(np.repeat(signs, self.sps), self.gaussian_taps, mode="full")
         frequencies = shaped * self.frequency_deviation_hz + self.carrier_offset_hz

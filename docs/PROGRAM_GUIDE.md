@@ -2,6 +2,11 @@
 
 ## Current scope
 
+Release **1.1.0** supports both reliable generic-v5 and ACK-free simple-frame 2FSK.
+Use the [1.1 migration and profile table](CONFIGURATION.md#upgrading-from-100-to-110)
+for node examples, operating modes, rates and the qualified hopping schedule.
+The generic link behavior below applies only when generic-v5 is selected.
+
 Two peer applications carry arbitrary byte packets over the radio link. Either
 peer can send. A timing leader/follower setting coordinates the radio schedule;
 it does not change the meaning or priority of application data.
@@ -25,7 +30,7 @@ Separate `peer-*-qpsk.yaml` examples retain QPSK. Each pair is intended for sepa
 computers, so their loopback input/output/status ports can be identical. Multiple
 instances on one computer require distinct bind and status ports.
 
-Profiles require `schema_version: 1`. Use `radio` for center frequency, sample
+Schema-1 profiles use `schema_version: 1`. Use `radio` for center frequency, sample
 rate, bandwidth, UHD selection, gains and antennas; `modem` for modulation and
 bit rate; `error_correction` for FEC; and `packet` for the built-in format and
 payload limit. `endpoint`, `link`, `authentication`, `status` and `recording`
@@ -100,8 +105,9 @@ The package is grouped by responsibility:
 packet_radio/
     app.py                  Resource ownership, application loop and recovery
     transmission.py         Burst preparation, TDD admission and timed TX
-    reception.py            Receive diagnostics, packet validation and delivery
+    reception.py            Receive samples/diagnostics and dispatch decoded frames
     config.py               Startup schema and validation
+    profiles.py             Schema-2 reusable definitions, composition and provenance
     endpoint.py             Local UDP and memory interfaces
     scheduler.py            Frequency/slot scheduling
     clock_sync.py           Hardware clock alignment
@@ -117,7 +123,13 @@ packet_radio/
         fec.py               Error-correction primitives
         decoder.py           Background receive decoder
     protocol/
-        framing.py           DATA/ACK/SYNC packet codec
+        interfaces.py        Packet-codec and link-behavior contracts
+        registry.py          Complete processing-profile selection
+        codec.py             Generic-v5 codec adapter and validation
+        generic.py           Generic-v5 ACK/replay/beacon and delivery behavior
+        framing.py           Frozen DATA/ACK/SYNC wire codec
+        simple.py            Configurable frame codec and reference 2FSK sample pipeline
+        simple_link.py       ACK-free modes, FIFO, framed input and live SimpleProfile
         authentication.py    Key loading and fingerprints
         replay_protection.py Session/sequence replay checks
         reliability.py       Queues, ACK/retry and duplicate suppression
@@ -142,6 +154,33 @@ algorithms belong in `modems/`, packet rules in `protocol/`, and device operatio
 in `hardware/`. The deployment preflight command and unsupported timed frequency
 tuning have been removed. Immediate frequency tuning, timed transmission and
 hardware clock synchronization remain available.
+
+The processing profile in `protocol/registry.py` supplies a `PacketCodec`, a
+`LinkBehavior` and a `BurstProcessing` composition. Live TX/RX, size validation and
+IQ replay select the same profile. The packet codec owns encoding, decoding,
+candidate validation and byte counts; the behavior owns identity allocation,
+ACK/retry/replay decisions, beacon generation, recovery and delivery. Existing
+protocol state remains on `RadioApp` for timing/diagnostic tooling, initialized by
+the selected behavior.
+
+`modems/burst.py` defines the byte-transform and envelope interfaces. A
+`TransformChain` applies transforms in explicit transmit order and reverses them
+on receive. The generic chain is Hamming/interleaving followed by optional RS.
+The packet codec supplies CRC/signature handling before this chain. Burst framing
+supplies training, sync, length-field interpretation and size; waveform constructors
+receive those components before building acquisition tables. The current interfaces
+operate on byte-aligned data. Step 3 adds configurable frame components and the
+reference 2FSK sample pipeline through `protocol/simple.py`. Step 4 connects it to
+`RadioApp(processing=SimpleProfile(...))` through `protocol/simple_link.py`; whitening, differential
+encoding and non-byte fields remain unsupported until required by a target.
+
+Schema 1 retains generic-v5 and its existing files unchanged. Schema 2 resolves a
+reusable radio definition plus local host settings through `profiles.py`, then
+`resolve_processing` selects generic-v5 or the simple format. The same resolved
+configuration drives validation, live operation and capture-format-3 replay.
+Schema-1 selection of `simple-frame-v1` still fails validation. See `CONFIGURATION.md`
+for composition, overrides, migration and the retained Python API.
+Software sample tests do not qualify a new RF operating profile.
 
 For a future waveform, add a module under `modems/`, implement the `Modem`
 contract (or reuse `StreamingModem` where appropriate), and register it in
@@ -216,3 +255,36 @@ Run the application manually using the command above. Local hardware qualificati
 uses `tools/uhd_link_check.py`; `tools/udp_peer_check.py` probes separately running
 radios on two computers. See `docs/UHD_SETUP.md` for instructions and current limits. Automatic
 service installation and monitoring deployment templates are not included.
+
+
+The live simple profile supplies transmit-only, receive-only and bidirectional
+behavior without ACKs/retries/SYNC, and validates preframed input separately from
+payload input. Its FIFO includes in-flight capacity and reports terminal TX drops.
+Transmit-only mode drains receive samples without decoding; receive-only mode never
+submits TX samples. Health requires local readiness, not a synchronized peer.
+The UHD adapter flushes a small zero-valued idle interval for this profile so the
+final CRC bits survive TX pipeline drain. The modem retains bounded idle history
+around maximum-size bursts. See the [live API](CONFIGURATION.md#version-11-live-simple-link-modes)
+for construction, limits and the repeatable `tools/simple_link_check.py` bench check.
+Step 5 makes the same selection available through schema-2 YAML and retains its
+complete configuration in capture format 3. Existing capture formats 1/2 remain readable.
+
+
+Schema-2 examples are in `configs/v1_1/`, referencing shared definitions in
+`configs/profiles/`. The validator's `--resolved` option prints the effective
+settings and definition fingerprint without accessing an SDR or exposing key paths.
+Profile paths and local file paths are node-relative in schema 2; schema 1 retains
+working-directory paths. See [reusable profiles](CONFIGURATION.md#version-11-reusable-profiles-schema-2)
+for the supported fields and mode-aware pair checks.
+
+### Hopping runtime
+
+Schema-2 simple profiles can resolve a frequency table into `FrequencyScheduler`.
+`RadioApp._retune` tracks absolute slots, counts skipped slots/clock reversals and
+serializes tuning with `DecoderWorker.retune`. The worker owns the decode lock,
+clears old output and partial frames, and discards samples during the post-tune
+guard. Synchronous reception applies the same guard. `transmission.transmit_one`
+rechecks complete-burst admission after modulation and drops crossing simple
+frames without retry. Fixed-frequency scheduling and wire formats are unchanged.
+Configuration limits and the external-UTC synchronization contract are documented
+in `CONFIGURATION.md`; `tools/hopping_check.py` exercises the conducted paths.

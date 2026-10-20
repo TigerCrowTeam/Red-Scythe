@@ -27,6 +27,7 @@ def app(role: str, clock: Clock):
         ),
         sdr=SimpleNamespace(sample_rate=2_000_000),
     )
+    radio.processing = SimpleNamespace(tx_idle_samples=lambda _: 0)
     radio.wall_clock = clock
     radio.monotonic_clock = clock
     radio.scheduler = SimpleNamespace(clock_offset=0.0)
@@ -224,3 +225,12 @@ def test_prepared_maximum_packet_survives_encoding_overrun_into_next_window(monk
         assert RadioPacket.decode(wire).payload == payload
     finally:
         application.close()
+
+
+def test_tdd_admission_includes_transport_idle_before_guard():
+    clock = Clock()
+    leader = app("leader", clock)
+    clock.now = 0.02
+    assert leader._tdd_burst_fits(16_000)
+    leader.processing = SimpleNamespace(tx_idle_samples=lambda _: 4000)
+    assert not leader._tdd_burst_fits(16_000)

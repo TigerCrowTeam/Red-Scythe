@@ -1,0 +1,30 @@
+profile_version: 1
+id: generic-2fsk-v5
+revision: 1
+reference: docs/PROTOCOL.md protocol 5
+qualification: short-conducted
+limitations:
+- Project-defined profile; no commercial-radio interoperability claim.
+- Single-host attenuated B205mini checks; no independent-host qualification.
+- Generic-v5 framing and reliable bidirectional payload mode only.
+waveform:
+  modulation: 2fsk
+  sample_rate_hz: 2000000
+  bandwidth_hz: 1000000
+  bit_rate_bps: 250000
+  frequency_deviation_hz: 125000
+frequency:
+  mode: fixed
+  center_frequency_hz: 915000000
+packet:
+  format: generic-v5
+  max_payload_bytes: 1024
+protection:
+  scheme: extended-hamming-8-4
+  interleaver_depth: 16
+  bit_repetitions: 1
+  rs_parity_bytes: 0
+link:
+  mode: reliable
+  ack_timeout_seconds: 0.6
+  max_retries: 4

@@ -1,0 +1,28 @@
+# Set local serials and gains for your hardware; these examples do not select a bench device.
+schema_version: 2
+profile: ../profiles/simple-2fsk-v1.yaml
+node_id: 2
+peer_id: 1
+timing_role: follower
+operation: receive-only
+input_kind: payload
+hardware:
+  device:
+    type: b200
+  tx_gain: 0
+  rx_gain: 0
+  tx_antenna: TX/RX
+  rx_antenna: RX2
+runtime:
+  decoder_worker_enabled: true
+  hardware_timed_io: true
+  hardware_timed_tx_lead_seconds: 0.01
+  queue_size: 256
+endpoint:
+  bind_host: 127.0.0.1
+  bind_port: 50010
+  destination_host: 127.0.0.1
+  destination_port: 50011
+status:
+  output: text
+  http_port: 8766

@@ -123,3 +123,39 @@ def test_bad_schema_fails_with_value_error(tmp_path, extra):
 def test_single_config_rejects_invalid_values(mutate, message):
     with pytest.raises(ValueError, match=message):
         validate_config(mutate(examples()["b"]))
+
+
+@pytest.mark.parametrize("margin", [-0.001, 0.01, float("nan"), True])
+def test_invalid_minimum_submission_lead_is_rejected(margin):
+    c = examples()["a"]
+    with pytest.raises(ValueError):
+        validate_config(replace(c, link=replace(c.link, hardware_min_tx_lead_seconds=margin)))
+
+
+@pytest.mark.parametrize("age", [0, -1, float("nan"), True])
+def test_queue_max_age_must_be_positive_when_enabled(age):
+    c = examples()["a"]
+    with pytest.raises(ValueError):
+        validate_config(replace(c, link=replace(c.link, queue_max_age_seconds=age)))
+
+
+def test_schema_two_queue_age_is_host_policy_without_rewriting_emulation():
+    c = load_config("configs/v1_1/peer-a-generic.yaml")
+    updated = replace(c, link=replace(c.link, queue_max_age_seconds=5))
+    validate_config(updated)
+    assert updated.emulation == c.emulation
+
+
+@pytest.mark.parametrize("packets", [0, 257, -1, True, 1.5])
+def test_invalid_hardware_tx_batch_packets_are_rejected(packets):
+    c = examples()["a"]
+    with pytest.raises(ValueError):
+        validate_config(replace(c, link=replace(c.link, hardware_tx_batch_packets=packets)))
+
+
+def test_tx_batch_size_is_host_policy_and_preserves_portable_profile():
+    c = load_config("configs/v1_1/peer-a-x310-generic.yaml")
+    updated = replace(c, link=replace(c.link, hardware_tx_batch_packets=16))
+    validate_config(updated)
+    assert updated.emulation == c.emulation
+    assert c.link.hardware_tx_batch_packets == 1

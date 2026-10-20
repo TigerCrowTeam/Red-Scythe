@@ -26,6 +26,9 @@ def test_socket_denial_still_writes_failure_report(tmp_path, monkeypatch):
     "options",
     [
         ["--duration", "nan"],
+        ["--tx-batch-packets", "16"],
+        ["--shared-device", "--tx-batch-packets", "0"],
+        ["--shared-device", "--tx-batch-packets", "257"],
         ["--rate", "inf"],
         ["--ack-timeout", "0"],
         ["--tdd-period", "-1"],
@@ -165,3 +168,58 @@ def test_worker_acknowledges_stop_only_after_resource_release(monkeypatch, close
     uhd_link_check.worker(None, pipe)
     assert messages[0][1]["actual_settings"]["device"]["serial"] == "test"
     assert messages[-1][0] == ("error" if close_fails else "stopped")
+
+
+def test_shared_worker_supports_cooperative_shutdown():
+    import threading
+
+    ready = threading.Event()
+
+    def run(*, stop_event):
+        ready.set()
+        assert stop_event.wait(2)
+
+    worker = uhd_link_check.ThreadPeer(target=run, daemon=True)
+    worker.start()
+    assert ready.wait(1)
+    worker.terminate()
+    assert not worker.is_alive()
+
+
+def test_post_workload_check_catches_recovery_transport_errors():
+    from packet_radio.statistics import LinkStatistics
+
+    before = LinkStatistics().snapshot()
+    after = dict(before, tx_underflows=1, transmit_errors=1)
+    assert uhd_link_check.post_workload_stream_errors([before], [after]) == [
+        {"tx_underflows": 1, "transmit_errors": 1}
+    ]
+    assert uhd_link_check.post_workload_stream_errors([before], [before]) == [{}]
+
+
+def test_batch_override_reaches_both_configs_before_start(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    radios = [
+        SimpleNamespace(radio=SimpleNamespace(tx_mtu=364, actual_settings={})) for _ in range(2)
+    ]
+    shared = SimpleNamespace(radios=radios, close=Mock())
+
+    def open_shared(configs):
+        assert [c.link.hardware_tx_batch_packets for c in configs] == [16, 16]
+        return shared
+
+    monkeypatch.setattr(uhd_link_check, "SharedRadios", open_shared)
+    monkeypatch.setattr(
+        "sys.argv", ["uhd_link_check", "--shared-device", "--tx-batch-packets", "16"]
+    )
+
+    def stop_before_start(*args, **kwargs):
+        assert args[0].link.hardware_tx_batch_packets == 16
+        raise RuntimeError("verified before worker startup")
+
+    monkeypatch.setattr(uhd_link_check, "start", stop_before_start)
+    with pytest.raises(RuntimeError, match="verified before worker startup"):
+        uhd_link_check.main()
+    shared.close.assert_called_once()

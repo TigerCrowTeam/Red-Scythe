@@ -8,6 +8,7 @@ from dataclasses import replace
 import pytest
 
 from packet_radio.config import configuration_snapshot, load_config
+from packet_radio.protocol.registry import resolve_processing
 from tools import udp_peer_check as probe
 
 
@@ -23,8 +24,11 @@ def free_ports():
 
 
 def status(config):
+    processing = resolve_processing(config)
+    configuration = configuration_snapshot(config)
+    configuration.update(packet_format=processing.name, processing=processing.describe())
     return dict.fromkeys(probe.STREAM_COUNTERS, 0) | {
-        "configuration": configuration_snapshot(config),
+        "configuration": configuration,
         "radio_ready": True,
         "modulation": config.sdr.modulation,
         "configured_bit_rate_bps": config.sdr.bit_rate_bps,
@@ -158,6 +162,54 @@ def test_profile_mismatch_fails_before_udp(monkeypatch):
 
     def unexpected(*args):
         pytest.fail("mismatched profile opened UDP")
+
+    monkeypatch.setattr(probe.socket, "socket", unexpected)
+    with pytest.raises(ValueError, match="effective configuration"):
+        probe.run_probe(c, run_id="mismatch", start_at=time.time() + 5, duration=1, rate=1, size=64)
+
+
+@pytest.mark.parametrize(
+    "path", ["configs/examples/peer-a-bpsk.yaml", "configs/v1_1/peer-a-simple.yaml"]
+)
+def test_probe_accepts_actual_application_processing_snapshot(monkeypatch, path):
+    from packet_radio.app import RadioApp
+    from packet_radio.config import AuthenticationConfig
+    from packet_radio.endpoint import MemoryEndpoint
+    from packet_radio.simulation import SimulatedChannel
+
+    ports = free_ports()
+    c = load_config(path)
+    c = replace(
+        c,
+        authentication=AuthenticationConfig(),
+        endpoint=replace(c.endpoint, bind_port=ports[0], destination_port=ports[1]),
+    )
+    app = RadioApp(c, sdr=SimulatedChannel().radio(), endpoint=MemoryEndpoint())
+    try:
+        monkeypatch.setattr(probe, "fetch_status", lambda url: app.statistics.snapshot())
+        report = probe.run_probe(
+            c,
+            run_id="actual-status",
+            start_at=time.time() + 0.05,
+            duration=0.05,
+            rate=20,
+            size=64,
+            grace=0,
+        )
+        assert report["missing_sequences"] == [0]
+        assert not report["passed"]  # No remote endpoint: only configuration acceptance is tested.
+    finally:
+        app.close()
+
+
+def test_processing_mismatch_fails_before_udp(monkeypatch):
+    c = load_config("configs/examples/peer-a-bpsk.yaml")
+    snapshot = status(c)
+    snapshot["configuration"]["processing"]["format"] = "wrong-format"
+    monkeypatch.setattr(probe, "fetch_status", lambda url: snapshot)
+
+    def unexpected(*args):
+        pytest.fail("mismatched processing opened UDP")
 
     monkeypatch.setattr(probe.socket, "socket", unexpected)
     with pytest.raises(ValueError, match="effective configuration"):

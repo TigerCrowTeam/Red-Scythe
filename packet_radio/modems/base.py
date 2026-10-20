@@ -13,7 +13,9 @@ from collections.abc import Callable, Iterable
 
 import numpy as np
 
-from .burst import SYNC, TRAINING, BurstEnvelope, PacketProtection
+from packet_radio.diagnostics import TimingDiagnostics
+
+from .burst import TRAINING, BurstEnvelope, BurstProcessing, PacketProtection
 
 
 def _root_raised_cosine(sps: int, rolloff: float, span_symbols: int) -> np.ndarray:
@@ -40,6 +42,7 @@ def _root_raised_cosine(sps: int, rolloff: float, span_symbols: int) -> np.ndarr
 
 
 class Modem(ABC):
+    timing: TimingDiagnostics
     candidate_validator: Callable[[bytes], bool] | None
     fec_corrected_bits: int
     fec_uncorrectable_frames: int
@@ -71,6 +74,7 @@ class StreamingModem(Modem):
     """Shared protection, bounded IQ buffering, timestamps and symbol pulse setup."""
 
     training = TRAINING
+    length_aware_live_search = False
 
     def __init__(
         self,
@@ -84,6 +88,7 @@ class StreamingModem(Modem):
         rrc_rolloff: float = 0.0,
         rrc_span_symbols: int = 8,
         timing_subsamples: int = 1,
+        processing: BurstProcessing | None = None,
     ):
         if samples_per_symbol < 2:
             raise ValueError("samples_per_symbol must be at least 2")
@@ -92,6 +97,7 @@ class StreamingModem(Modem):
         if interleaver_depth < 1:
             raise ValueError("interleaver_depth must be positive")
         self.candidate_validator: Callable[[bytes], bool] | None = None
+        self.timing = TimingDiagnostics()
         self.sps = samples_per_symbol
         self.max_frame = max_frame
         self.sample_rate = sample_rate
@@ -113,17 +119,28 @@ class StreamingModem(Modem):
         self._rrc_taps = (
             _root_raised_cosine(self.sps, rrc_rolloff, rrc_span_symbols) if rrc_rolloff else None
         )
-        self.protection = PacketProtection(interleaver_depth, rs_parity_bytes)
-        self.envelope = BurstEnvelope(self.training)
+        self.processing = processing or BurstProcessing(
+            PacketProtection(interleaver_depth, rs_parity_bytes), BurstEnvelope(self.training)
+        )
+        self.protection = self.processing.protection
+        self.envelope = self.processing.envelope
+        self.length_bits = self.envelope.length_bytes * 8
+        self.bit_order = getattr(self.envelope, "bit_order", "big")
         self._samples = np.empty(0, dtype=np.complex64)
-        self._sync_bits = np.unpackbits(np.frombuffer(SYNC, dtype=np.uint8))
-        self._training_bits = np.unpackbits(np.frombuffer(self.training, dtype=np.uint8))
+        self._sync_bits = np.unpackbits(
+            np.frombuffer(self.envelope.sync, dtype=np.uint8), bitorder=self.bit_order
+        )
+        self._training_bits = np.unpackbits(
+            np.frombuffer(self.envelope.training, dtype=np.uint8), bitorder=self.bit_order
+        )
         self._preamble_bits = np.concatenate((self._training_bits, self._sync_bits))
         self.fec_corrected_bits = 0
         self.fec_uncorrectable_frames = 0
         self._noise_power: float | None = None
         self._burst_active = False
         self._live_block_size = 0
+        self._next_live_search_samples = 0
+        self._pending_frame_samples: int | None = None
         self._buffer_time_ns: int | None = None
         self._last_frame_start_sample: float | None = None
         self._decoded_arrival_times: list[int | None] = []
@@ -132,10 +149,7 @@ class StreamingModem(Modem):
 
     def frame_size(self, payload_size: int) -> int:
         """Return on-air envelope bytes before conversion to waveform samples."""
-        return (
-            self.envelope.encoded_size(self.protection.encoded_size(payload_size))
-            * self.bit_repetitions
-        )
+        return self.processing.encoded_size(payload_size) * self.bit_repetitions
 
     def reset(self) -> None:
         """Discard acquisition/history after a discontinuity; keep cumulative FEC counters."""
@@ -143,6 +157,8 @@ class StreamingModem(Modem):
         self._noise_power = None
         self._burst_active = False
         self._live_block_size = 0
+        self._next_live_search_samples = 0
+        self._pending_frame_samples = None
         self._buffer_time_ns = None
         self._last_frame_start_sample = None
         self._decoded_arrival_times = []
@@ -173,9 +189,11 @@ class StreamingModem(Modem):
                     self._samples = np.empty(0, dtype=np.complex64)
                     self._buffer_time_ns = int(time_ns)
                     self._burst_active = False
+                    self._next_live_search_samples = 0
+                    self._pending_frame_samples = None
         self._decoded_arrival_times = []
         power = float(np.mean(np.abs(incoming) ** 2))
-        minimum_samples = (len(SYNC) + 2) * 8 * self.sps
+        minimum_samples = (len(self.envelope.sync) + self.envelope.length_bytes) * 8 * self.sps
         idle = (
             self._noise_power is not None
             # Unit-amplitude simulation/replay streams contain no idle gap;
@@ -189,7 +207,7 @@ class StreamingModem(Modem):
             # quadratic and eventually causes hardware RX overflows. Keep two
             # read-sized blocks so a burst beginning at a block edge retains
             # its complete preamble, but defer correlation until energy rises.
-            keep = max(minimum_samples, len(incoming) * 2)
+            keep = min(self.sample_count(self.max_frame), max(minimum_samples, len(incoming) * 2))
             self._samples = np.concatenate((self._samples, incoming))
             self._keep_tail(keep)
             self._noise_power = 0.98 * self._noise_power + 0.02 * power
@@ -214,10 +232,10 @@ class StreamingModem(Modem):
         else:
             self._burst_active = True
         # Live SDR streams have a low idle-noise floor and explicit gaps between
-        # TDD bursts. Searching every growing partial burst repeats the expensive
-        # timing/correlation work and can starve the SDR receive stream. Accumulate
-        # the burst and search once when the following idle block arrives. Unit-
-        # amplitude simulation/replay streams retain immediate streaming decode.
+        # bursts. Searching every growing partial burst repeats expensive work.
+        # BPSK/FSK can schedule a search from a candidate's length; other waveforms
+        # retain the idle/full-buffer trigger. Unit-amplitude simulation/replay
+        # streams retain immediate streaming decode.
         live_burst = (
             self._noise_power is not None
             and self._noise_power < 1e-4
@@ -227,20 +245,42 @@ class StreamingModem(Modem):
         )
         if live_burst:
             maximum = self.sample_count(self.max_frame)
-            if len(self._samples) > maximum:
-                self._keep_tail(maximum)
-            return []
+            # Live accumulation includes idle history and a trailing block. Keep
+            # this bounded margin so a maximum-sized burst retains its preamble.
+            maximum += min(maximum, 3 * self._live_block_size)
+            if self.length_aware_live_search:
+                if len(self._samples) < min(maximum, self._next_live_search_samples):
+                    return []
+            elif len(self._samples) < maximum:
+                return []
+            # Some front ends leave a slowly decaying tail above the idle
+            # threshold. Search before bounding the buffer: trimming here would
+            # discard a maximum-sized packet's preamble before ever decoding it.
         frames: list[bytes] = []
         while True:
+            self._pending_frame_samples = None
             found = self._find_frame()
             if found is None:
+                # A plausible frame length lets us defer expensive correlation until
+                # the body can be complete. Without one, space live searches by
+                # 4 ms of new IQ (or a larger block). Idle/full-buffer checks
+                # still take priority to preserve acquisition and memory bounds.
+                self._next_live_search_samples = self._pending_frame_samples or (
+                    len(self._samples) + max(self._live_block_size, int(self.sample_rate * 0.004))
+                )
                 # Bound memory while retaining enough history for the largest frame.
                 maximum = self.sample_count(self.max_frame)
+                maximum += min(maximum, 3 * self._live_block_size)
                 if len(self._samples) > maximum:
                     self._keep_tail(maximum)
                 break
             payload, consumed = found
             if payload is not None:
+                if self.timing.enabled:
+                    self.timing.observe(
+                        "rx_frame_buffer_tail_ms",
+                        max(0, len(self._samples) - consumed) / self.sample_rate * 1000,
+                    )
                 frames.append(payload)
                 arrival = None
                 if self._buffer_time_ns is not None and self._last_frame_start_sample is not None:
@@ -251,14 +291,21 @@ class StreamingModem(Modem):
             self._consume(consumed)
         if idle and self._burst_active:
             self._burst_active = False
-            keep = max(minimum_samples, len(incoming) * 2)
+            self._next_live_search_samples = 0
+            keep = min(self.sample_count(self.max_frame), max(minimum_samples, len(incoming) * 2))
             self._keep_tail(keep)
         return list(zip(frames, self._decoded_arrival_times, strict=True))
 
     def _consume(self, count: int) -> None:
         self._samples = self._samples[count:]
+        self._next_live_search_samples = max(0, self._next_live_search_samples - count)
         if self._buffer_time_ns is not None:
             self._buffer_time_ns += int(count / self.sample_rate * 1e9)
+
+    def _await_frame_samples(self, count: int) -> None:
+        """Schedule a live search at the earliest plausible complete candidate."""
+        if count > len(self._samples):
+            self._pending_frame_samples = min(self._pending_frame_samples or count, count)
 
     def _keep_tail(self, count: int) -> None:
         removed = max(0, len(self._samples) - count)

@@ -13,12 +13,16 @@ from collections import deque
 from copy import deepcopy
 from typing import Any
 
+from packet_radio.diagnostics import TimingDiagnostics
+
 
 class LinkStatistics:
     """Thread-safe link counters and gauges with JSON-friendly snapshots."""
 
     COUNTERS = (
         "shutdown_errors",
+        "mode_rejections",
+        "transmit_drops",
         "control_queue_drops",
         "retry_exhausted",
         "unexpected_peer_packets",
@@ -38,6 +42,7 @@ class LinkStatistics:
         "samples_transmitted",
         "airtime_seconds_transmitted",
         "invalid_packets",
+        "candidate_rejections",
         "protocol_version_mismatches",
         "authentication_failures",
         "replay_rejections",
@@ -50,6 +55,7 @@ class LinkStatistics:
         "acknowledgements_received",
         "duplicates_suppressed",
         "queue_drops",
+        "queue_expired",
         "channel_busy_deferrals",
         "transmit_errors",
         "tx_underflows",
@@ -62,9 +68,17 @@ class LinkStatistics:
         "rx_buffer_flushes",
         "timed_transmissions",
         "timed_transmit_late",
+        "host_tx_late_rejections",
+        "tx_lead_rejections",
+        "tx_lead_deferrals",
+        "uhd_tx_late_events",
         "timed_receive_windows",
         "scheduled_tdd_transmissions",
         "frequency_hops",
+        "hop_burst_rejections",
+        "hop_slots_missed",
+        "hop_clock_reversals",
+        "hop_tune_deadlines_missed",
         "tdd_opportunities_missed",
         "recording_failures",
         "synchronization_losses",
@@ -76,7 +90,14 @@ class LinkStatistics:
         "decoder_output_drops",
     )
 
-    def __init__(self, monotonic_clock=time.monotonic, activity_timeout_seconds=15.0):
+    def __init__(
+        self,
+        monotonic_clock=time.monotonic,
+        activity_timeout_seconds=15.0,
+        *,
+        timing_diagnostics=False,
+    ):
+        self.timing = TimingDiagnostics(timing_diagnostics, monotonic_clock)
         self._clock = monotonic_clock
         self._started_at = monotonic_clock()
         self._lock = threading.Lock()
@@ -87,6 +108,9 @@ class LinkStatistics:
         self._rate_window = 5.0
         self._counters: dict[str, int | float] = {name: 0 for name in self.COUNTERS}
         self._gauges: dict[str, str | int | float | bool | None] = {
+            "requires_peer": True,
+            "operation": "bidirectional",
+            "input_kind": "payload",
             "modulation": None,
             "configured_bit_rate_bps": None,
             "configured_center_frequency_hz": None,
@@ -94,12 +118,14 @@ class LinkStatistics:
             "radio_ready": False,
             "queue_depth": 0,
             "queue_airtime_seconds": 0.0,
+            "oldest_pending_packet_age_ms": 0.0,
             "control_queue_depth": 0,
             "queue_capacity": 0,
             "awaiting_acknowledgements": 0,
             "estimated_signal_power": 0.0,
             "active_frequency_hz": None,
             "frequency_slot": None,
+            "hop_retune_ms": None,
             "transmit_allowed": False,
             "synchronized": True,
             "hardware_clock_offset_ns": None,
@@ -165,6 +191,7 @@ class LinkStatistics:
                 activity[flag] = age is not None and age <= self._activity_timeout
                 activity[f"last_{event}_age_seconds"] = age
             return {
+                **({"timing_diagnostics": self.timing.snapshot()} if self.timing.enabled else {}),
                 **deepcopy(self._radio_info),
                 **self._counters,
                 **self._gauges,

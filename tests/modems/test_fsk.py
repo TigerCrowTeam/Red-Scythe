@@ -136,3 +136,41 @@ def test_capture_replays_configured_deviation(tmp_path):
     recorder.record_iq(make_modem(c.sdr).modulate(wire))
     recorder.close()
     assert list(replay_iq(tmp_path)) == [wire]
+
+
+@pytest.mark.parametrize("modulation", ["2fsk", "msk", "gmsk"])
+def test_live_length_aware_decode_preserves_maximum_and_following_frame(modulation):
+    cfg = load_config(f"configs/bench/peer-a-{modulation}.yaml")
+    tx, rx = make_modem(cfg.sdr), make_modem(cfg.sdr)
+    rx.candidate_validator = has_valid_crc
+    packets = [
+        RadioPacket(1, 2, i, payload).encode()
+        for i, payload in enumerate([bytes(range(256)) * 4, b"next"])
+    ]
+    waves = [tx.modulate(packet) * 0.03 for packet in packets]
+    # Above-floor tail and an immediately following packet must neither duplicate
+    # the early-delivered maximum frame nor hide the second preamble.
+    stream = np.concatenate(
+        (
+            np.zeros(16384, np.complex64),
+            waves[0],
+            np.full(4096, 0.001, np.complex64),
+            waves[1],
+            np.full(16384, 0.001, np.complex64),
+            np.zeros(16384, np.complex64),
+        )
+    )
+    rng = np.random.default_rng(104)
+    stream += (rng.normal(0, 1e-5, len(stream)) + 1j * rng.normal(0, 1e-5, len(stream))).astype(
+        np.complex64
+    )
+    received = []
+    first_at = None
+    for start in range(0, len(stream), 4096):
+        frames = rx.feed_timed(stream[start : start + 4096], 1000000000 + start * 500)
+        if frames and first_at is None:
+            first_at = start + 4096
+        received.extend(frame for frame, _ in frames)
+    assert received == packets
+    assert first_at <= 16384 + len(waves[0]) + 8192
+    assert len(rx._samples) <= 2 * rx.sample_count(rx.max_frame)

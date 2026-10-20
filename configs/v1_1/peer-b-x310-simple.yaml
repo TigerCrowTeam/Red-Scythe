@@ -1,0 +1,30 @@
+# Conducted X310 bench: A TX/RX -> 30 dB -> B RX2, and B TX/RX -> 30 dB -> A RX2.
+schema_version: 2
+profile: ../profiles/simple-2fsk-v1.yaml
+node_id: 2
+peer_id: 1
+timing_role: follower
+operation: bidirectional
+input_kind: payload
+hardware:
+  device:
+    type: x300
+    addr: 192.168.10.2
+  tx_gain: 0
+  rx_gain: 0
+  tx_antenna: TX/RX
+  rx_antenna: RX2
+  channel: 1
+runtime:
+  decoder_worker_enabled: true
+  hardware_timed_io: true
+  hardware_timed_tx_lead_seconds: 0.01
+  queue_size: 256
+endpoint:
+  bind_host: 127.0.0.1
+  bind_port: 50010
+  destination_host: 127.0.0.1
+  destination_port: 50011
+status:
+  output: text
+  http_port: 8766

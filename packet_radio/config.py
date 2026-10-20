@@ -13,9 +13,11 @@ import math
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from types import UnionType
-from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
+from typing import TYPE_CHECKING, Any, Literal, Union, get_args, get_origin, get_type_hints
 
-import yaml
+if TYPE_CHECKING:
+    from packet_radio.protocol.registry import ProcessingProfile
+
 
 from packet_radio.modems.registry import samples_per_symbol, waveform
 
@@ -130,6 +132,7 @@ class LinkConfig:
     queue_size: int = 256
     control_queue_size: int = 32
     queue_airtime_seconds: float | None = None
+    queue_max_age_seconds: float | None = None
     tdd_period_seconds: float = 0.0
     tdd_guard_seconds: float = 0.0
     tdd_inter_burst_seconds: float | None = None
@@ -140,6 +143,8 @@ class LinkConfig:
     hardware_timed_io: bool = False
     hardware_timed_tx_lead_seconds: float = 0.01
     hardware_sync_tx_lead_seconds: float = 0.01
+    hardware_min_tx_lead_seconds: float = 0.0
+    hardware_tx_batch_packets: int = 1
     hardware_clock_sync: bool = False
     hardware_epoch_lead_seconds: float = 2.0
     hardware_slot_scheduling: bool = False
@@ -200,7 +205,10 @@ class RadioConfig:
     recording: RecordingConfig = field(default_factory=RecordingConfig)
     authentication: AuthenticationConfig = field(default_factory=AuthenticationConfig)
     schema_version: int = 1
-    packet_format: Literal["generic-v5"] = "generic-v5"
+    packet_format: Literal["generic-v5", "simple-frame-v1"] = "generic-v5"
+    emulation: dict[str, Any] | None = None
+    operation: Literal["bidirectional", "transmit-only", "receive-only"] = "bidirectional"
+    input_kind: Literal["payload", "frame"] = "payload"
 
     @property
     def center_frequency_hz(self) -> float:
@@ -210,6 +218,8 @@ class RadioConfig:
 
 
 def _matches(value: Any, annotation: Any) -> bool:
+    if annotation is Any:
+        return True
     origin = get_origin(annotation)
     args = get_args(annotation)
     if origin in (Union, UnionType):
@@ -250,8 +260,13 @@ def _check_types(value):
 
 
 def load_config(path: str | Path) -> RadioConfig:
-    with Path(path).open(encoding="utf-8") as stream:
-        raw = yaml.safe_load(stream)
+    from packet_radio.profiles import load_v2, read_yaml
+
+    raw = read_yaml(Path(path))
+    if type(raw.get("schema_version")) is int and raw["schema_version"] == 2:
+        config = load_v2(raw, Path(path))
+        validate_config(config)
+        return config
     if not isinstance(raw, dict):
         raise ValueError("configuration must be a mapping")
     raw = dict(raw)
@@ -326,11 +341,22 @@ def load_config(path: str | Path) -> RadioConfig:
     return config
 
 
-def validate_config(config: RadioConfig) -> None:
+def validate_config(config: RadioConfig, *, processing: ProcessingProfile | None = None) -> None:
     """Validate a peer without opening sockets, keys, or SDR devices."""
     _check_types(config)
-    if config.schema_version != 1:
+    if config.schema_version not in (1, 2):
         raise ValueError("unsupported configuration schema_version")
+    if config.schema_version == 1 and (
+        config.packet_format != "generic-v5"
+        or config.emulation is not None
+        or config.operation != "bidirectional"
+        or config.input_kind != "payload"
+    ):
+        raise ValueError("schema 1 supports only generic-v5 bidirectional payloads")
+    if config.schema_version == 2:
+        from packet_radio.profiles import validate_resolved
+
+        validate_resolved(config)
     for section in (
         config.sdr,
         config.frequency,
@@ -397,6 +423,13 @@ def validate_config(config: RadioConfig) -> None:
         raise ValueError("frequency list contains duplicates")
     if freq.interval_seconds <= 0 or not 0 <= freq.guard_seconds < freq.interval_seconds / 2:
         raise ValueError("invalid frequency guard interval")
+    if (
+        config.schema_version == 2
+        and len(freq.frequencies_hz) > 1
+        and freq.interval_seconds < 1
+        and sdr.device.get("type") != "x300"
+    ):
+        raise ValueError("hopping above 1 hop/s requires an explicitly selected X300-series device")
     if freq.reacquire_dwell_seconds <= 0 or freq.sync_loss_seconds <= 0:
         raise ValueError("invalid synchronization recovery settings")
     link = config.link
@@ -404,6 +437,8 @@ def validate_config(config: RadioConfig) -> None:
         raise ValueError("invalid ACK, retry, or duplicate window settings")
     if link.queue_airtime_seconds is not None and link.queue_airtime_seconds <= 0:
         raise ValueError("queue_airtime_seconds must be positive")
+    if link.queue_max_age_seconds is not None and link.queue_max_age_seconds <= 0:
+        raise ValueError("queue_max_age_seconds must be positive")
     if link.queue_size < 1 or link.control_queue_size < 1:
         raise ValueError("queue capacities must be positive")
     if (
@@ -425,6 +460,14 @@ def validate_config(config: RadioConfig) -> None:
     for name in ("hardware_timed_tx_lead_seconds", "hardware_sync_tx_lead_seconds"):
         if not 0.002 <= getattr(link, name) <= 0.1:
             raise ValueError(f"invalid {name}")
+    if not 1 <= link.hardware_tx_batch_packets <= 256:
+        raise ValueError("hardware_tx_batch_packets must be in 1..256")
+    if (
+        not 0
+        <= link.hardware_min_tx_lead_seconds
+        < min(link.hardware_timed_tx_lead_seconds, link.hardware_sync_tx_lead_seconds)
+    ):
+        raise ValueError("hardware_min_tx_lead_seconds must be nonnegative and below both TX leads")
     if not 0.5 <= link.hardware_epoch_lead_seconds <= 10:
         raise ValueError("invalid hardware epoch lead")
     if not 0.003 <= link.hardware_slot_lookahead_seconds <= 0.05:
@@ -476,13 +519,27 @@ def validate_config(config: RadioConfig) -> None:
     if auth.replay_state_file is not None and not auth.replay_state_file.strip():
         raise ValueError("replay state path cannot be empty")
 
-    from packet_radio.modems.registry import make_modem
-    from packet_radio.protocol.framing import RadioPacket
+    from packet_radio.protocol.registry import resolve_processing
 
-    modem = make_modem(sdr)
-    largest = RadioPacket(config.node_id, config.peer_id, 0, bytes(endpoint.max_payload_bytes))
-    wire_size = largest.encoded_size(authenticated=auth.private_key_file is not None)
+    selected = resolve_processing(config)
+    if (
+        config.schema_version == 2
+        and processing is not None
+        and processing.describe() != selected.describe()
+    ):
+        raise ValueError("processing override disagrees with resolved schema-2 profile")
+    processing = processing or selected
+    processing.validate(config)
+    modem = processing.make_modem(sdr)
+    wire_size = processing.codec.payload_size(
+        endpoint.max_payload_bytes, authenticated=auth.private_key_file is not None
+    )
     maximum_airtime = modem.sample_count(wire_size) / sdr.sample_rate
+    if len(freq.frequencies_hz) > 1:
+        lead = link.hardware_timed_tx_lead_seconds if link.hardware_timed_io else 0
+        idle = processing.tx_idle_samples(sdr) / sdr.sample_rate
+        if maximum_airtime + lead + idle + 0.001 > freq.interval_seconds - 2 * freq.guard_seconds:
+            raise ValueError("largest encoded packet cannot fit the configured hop dwell")
     if link.queue_airtime_seconds is not None and maximum_airtime > link.queue_airtime_seconds:
         raise ValueError("queue airtime limit cannot admit the maximum payload")
     if link.tdd_period_seconds:
@@ -498,12 +555,30 @@ def validate_network(configs: dict[str, RadioConfig]) -> None:
     for config in configs.values():
         validate_config(config)
     first, second = configs.values()
-    if first.node_id == second.node_id:
-        raise ValueError("duplicate radio node IDs")
-    if first.peer_id != second.node_id or second.peer_id != first.node_id:
-        raise ValueError("peer IDs must point to each other")
-    if {first.timing_role, second.timing_role} != {"leader", "follower"}:
-        raise ValueError("network requires one timing leader and one follower")
+    if first.packet_format != second.packet_format:
+        raise ValueError("packet formats differ between peers")
+    simple = first.packet_format == "simple-frame-v1"
+    if simple:
+        from packet_radio.protocol.registry import resolve_processing
+
+        if (
+            resolve_processing(first).describe()["frame"]
+            != resolve_processing(second).describe()["frame"]
+        ):
+            raise ValueError("frame/protection settings differ between peers")
+        a, b = first.operation, second.operation
+        if not (
+            (a != "receive-only" and b != "transmit-only")
+            or (b != "receive-only" and a != "transmit-only")
+        ):
+            raise ValueError("simple pair has no compatible transmit/receive direction")
+    else:
+        if first.node_id == second.node_id:
+            raise ValueError("duplicate radio node IDs")
+        if first.peer_id != second.node_id or second.peer_id != first.node_id:
+            raise ValueError("peer IDs must point to each other")
+        if {first.timing_role, second.timing_role} != {"leader", "follower"}:
+            raise ValueError("network requires one timing leader and one follower")
     if first.frequency != second.frequency:
         raise ValueError("frequency schedule differs between peers")
     for name in (
@@ -523,9 +598,11 @@ def validate_network(configs: dict[str, RadioConfig]) -> None:
         if getattr(first.sdr, name) != getattr(second.sdr, name):
             raise ValueError(f"waveform {name} differs between peers")
     for item in fields(LinkConfig):
-        if item.name.startswith(("tdd_", "hardware_")) and getattr(
-            first.link, item.name
-        ) != getattr(second.link, item.name):
+        if (
+            not simple
+            and item.name.startswith(("tdd_", "hardware_"))
+            and getattr(first.link, item.name) != getattr(second.link, item.name)
+        ):
             raise ValueError(f"timing {item.name} differs between peers")
     if first.endpoint.max_payload_bytes != second.endpoint.max_payload_bytes:
         raise ValueError("payload limits differ between peers")
@@ -545,3 +622,47 @@ def configuration_snapshot(config: RadioConfig) -> dict[str, Any]:
         for node, paths in config.authentication.public_key_files.items()
     }
     return json.loads(json.dumps(result))
+
+
+def config_from_snapshot(raw: dict[str, Any]) -> RadioConfig:
+    """Restore complete resolved capture settings without opening paths or loading keys."""
+    from packet_radio.profiles import mapping
+
+    names = {item.name for item in fields(RadioConfig)}
+    raw = mapping(raw, names, names, "resolved configuration")
+    for name, cls in (
+        ("sdr", SDRConfig),
+        ("endpoint", EndpointConfig),
+        ("link", LinkConfig),
+        ("status", StatusConfig),
+        ("recording", RecordingConfig),
+    ):
+        section_names = {item.name for item in fields(cls)}
+        raw[name] = _section(cls, mapping(raw[name], section_names, section_names, name))
+    freq = mapping(
+        raw["frequency"],
+        {f.name for f in fields(FrequencyConfig)},
+        {f.name for f in fields(FrequencyConfig)},
+        "frequency",
+    )
+    if not isinstance(freq["frequencies_hz"], list):
+        raise ValueError("capture frequency list must be an array")
+    freq["frequencies_hz"] = tuple(freq["frequencies_hz"])
+    raw["frequency"] = _section(FrequencyConfig, freq)
+    auth = mapping(
+        raw["authentication"],
+        {f.name for f in fields(AuthenticationConfig)},
+        {f.name for f in fields(AuthenticationConfig)},
+        "authentication",
+    )
+    keys = auth["public_key_files"]
+    if not isinstance(keys, dict) or any(not isinstance(k, str) or not k.isdecimal() for k in keys):
+        raise ValueError("invalid capture authentication node keys")
+    converted = {int(k): v for k, v in keys.items()}
+    if len(converted) != len(keys):
+        raise ValueError("duplicate capture authentication node keys")
+    auth["public_key_files"] = converted
+    raw["authentication"] = _section(AuthenticationConfig, auth)
+    config = _section(RadioConfig, raw)
+    validate_config(config)
+    return config

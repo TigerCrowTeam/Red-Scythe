@@ -255,3 +255,16 @@ def test_conformance_cli_success_and_corrupted_fixture(monkeypatch, tmp_path, ca
         invoke(monkeypatch, conformance, path)
     assert error.value.code == 1
     assert "signed wire bytes changed" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("paired", [False, True])
+def test_timing_diagnostics_flag_reaches_single_and_shared_launch(monkeypatch, paired):
+    from packet_radio.hardware import shared
+
+    run = Mock()
+    monkeypatch.setattr(shared if paired else radio_cli, "run_pair" if paired else "run", run)
+    options = ["--config", "configs/v1_1/peer-a-x310-simple.yaml", "--timing-diagnostics"]
+    if paired:
+        options += ["--peer-config", "configs/v1_1/peer-b-x310-simple.yaml"]
+    invoke(monkeypatch, radio_cli, *options)
+    assert run.call_args.kwargs == {"timing_diagnostics": True}

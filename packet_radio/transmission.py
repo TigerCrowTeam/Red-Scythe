@@ -9,12 +9,10 @@ from __future__ import annotations
 
 import logging
 import secrets
-import struct
 import time
-from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from packet_radio.protocol.framing import PacketKind, RadioPacket
+from packet_radio.hardware.uhd import TransmitDeadlineError
 
 if TYPE_CHECKING:
     from packet_radio.app import RadioApp
@@ -39,75 +37,46 @@ def transmit_one(app: RadioApp) -> None:
         scheduled_channel_allowed = (
             target_state.transmit_allowed and target_state.frequency_hz == app.current_frequency
         )
-    # In scheduled TDD mode the slot assignment is the collision-avoidance
-    # mechanism.  RX power from the preceding peer burst can remain in the
-    # last sample block and would otherwise defer the entire return slot.
-    clear = (
-        True
-        if app.config.link.tdd_period_seconds > 0
-        else app.channel_power < app.config.link.channel_busy_threshold
-    )
-    if not clear and app.link.queue:
-        app.statistics.increment("channel_busy_deferrals")
-        app.link.back_off()
+    clear = app.behavior.channel_clear(app)
     tdd_allowed = (
         scheduled is not None
         if app.config.link.hardware_slot_scheduling
         else app._tdd_transmit_allowed()
     )
+    selection_started = app.statistics.timing.start()
     queued = app.link.next_packet(
         clear,
-        state.transmit_allowed and scheduled_channel_allowed and tdd_allowed and not app.recovering,
+        state.transmit_allowed
+        and (
+            len(app.config.frequency.frequencies_hz) == 1
+            or app.monotonic_clock() >= app._hop_ready_at
+        )
+        and scheduled_channel_allowed
+        and tdd_allowed
+        and app.behavior.transmit_allowed(app),
     )
+    app.statistics.timing.finish("packet_selection_ms", selection_started)
     if queued is None:
         return
-    if not queued.sequence_assigned:
-        queued.packet = replace(queued.packet, sequence=app.sequence, session_id=app.session_id)
-        queued.sequence_assigned = True
-        app.sequence = (app.sequence + 1) & 0xFFFFFFFF
-        if app.sequence == 0:
-            app.session_id = max(app.session_id + 1, new_session_id())
-            app.link.session_id = app.session_id
+    if app.statistics.timing.enabled:
+        app.statistics.timing.observe(
+            "selected_packet_age_ms", (app.monotonic_clock() - queued.enqueued_at) * 1000
+        )
     try:
         target_ns: int | None = scheduled[0] if scheduled is not None else None
         target_leader_ns: int | None = scheduled[1] if scheduled is not None else None
-        if queued.packet.kind == PacketKind.SYNC:
-            if app.config.link.hardware_timed_io and target_ns is None:
-                # A sync beacon must embed its target before modulation, so
-                # give only this infrequent control packet a longer budget.
-                target_ns = app.sdr.hardware_time() + int(
-                    app.config.link.hardware_sync_tx_lead_seconds * 1e9
-                )
-            # Timestamp at airtime, not enqueue time; guard/backoff delays must
-            # not look like clock error to recovering nodes.
-            sync_time = (
-                target_ns / 1e9
-                if app.config.link.hardware_clock_sync and target_ns is not None
-                else app.wall_clock()
-                + (
-                    app.config.link.hardware_timed_tx_lead_seconds
-                    if app.config.link.hardware_timed_io
-                    else 0.0
-                )
-            )
-            payload = struct.pack("!d", sync_time)
-            if app.config.link.hardware_clock_sync and target_ns is not None:
-                payload += struct.pack("!Q", target_ns)
-            queued.packet = RadioPacket(
-                queued.packet.source,
-                queued.packet.destination,
-                queued.packet.sequence,
-                payload,
-                PacketKind.SYNC,
-                queued.packet.session_id,
-            )
+        target_ns = app.behavior.prepare(app, queued, target_ns)
         prepared = app._prepared_burst
         if prepared is not None and prepared[0] is queued:
             _, wire, samples = prepared
         else:
-            wire = queued.packet.encode(app.signing_key)
+            started = app.statistics.timing.start()
+            wire = app.codec.encode(queued.packet, app.signing_key)
+            app.statistics.timing.finish("packet_encode_ms", started)
+            started = app.statistics.timing.start()
             samples = app.modem.modulate(wire)
-            if app.config.link.tdd_period_seconds > 0 and queued.packet.kind != PacketKind.SYNC:
+            app.statistics.timing.finish("packet_modulate_ms", started)
+            if app.config.link.tdd_period_seconds > 0 and app.behavior.cacheable(queued):
                 # Keep just one prepared burst if encoding consumes this
                 # window. A later window can then admit the full RF burst
                 # without paying modulation time again. Never cache SYNC:
@@ -122,18 +91,39 @@ def transmit_one(app: RadioApp) -> None:
                 else app.config.link.hardware_timed_tx_lead_seconds
             )
         )
+        if len(app.config.frequency.frequencies_hz) > 1:
+            # Recheck after modulation: CPU work may have consumed the dwell.
+            duration = (
+                len(samples) + app.processing.tx_idle_samples(app.config.sdr)
+            ) / app.config.sdr.sample_rate
+            duration += 0.001
+            if app.config.link.hardware_timed_io:
+                duration += timed_lead
+            fresh = app.scheduler.state()
+            if (
+                fresh.slot != state.slot
+                or fresh.frequency_hz != app.current_frequency
+                or not app.scheduler.burst_fits(duration)
+                or app.monotonic_clock() < app._hop_ready_at
+            ):
+                app.statistics.increment("hop_burst_rejections")
+                app._prepared_burst = None
+                app.behavior.transmit_failed(app, queued)
+                return
         if not app._tdd_burst_fits(len(samples), timed_lead, target_leader_ns):
             app.link.requeue(queued)
             return
+        submit_started = app.statistics.timing.start()
         if app.config.link.hardware_timed_io:
             if target_ns is None:
-                # Choose the normal data target after modulation and after
-                # acquiring the RX/TX I/O lock. This prevents CPU work and a
-                # pending readStream timeout from consuming the short lead.
+                # The backend chooses the target after its own preparation;
+                # IQ ownership and stale-event handling must not consume lead.
                 target_ns = app.sdr.transmit_with_lead(
                     samples,
                     int(app.config.link.hardware_timed_tx_lead_seconds * 1e9),
                 )
+                if app.statistics.timing.enabled:
+                    app.statistics.set_gauge("scheduled_tx_target_ns", target_ns)
             else:
                 lead_ns = target_ns - app.sdr.hardware_time()
                 app.statistics.set_gauge("scheduled_tx_lead_ms", lead_ns / 1e6)
@@ -141,13 +131,17 @@ def transmit_one(app: RadioApp) -> None:
                 # A beacon's lead starts before encoding its timestamp. Its
                 # remaining lead is necessarily shorter after modulation.
                 # Only fixed TDD opportunities require the full slot margin.
-                minimum_lead_ns = (
-                    int(app.config.link.hardware_timed_tx_lead_seconds * 1e9)
-                    if scheduled is not None
-                    else 0
+                minimum_lead_ns = int(
+                    (
+                        app.config.link.hardware_timed_tx_lead_seconds
+                        if scheduled is not None
+                        else app.config.link.hardware_min_tx_lead_seconds
+                    )
+                    * 1e9
                 )
                 if lead_ns <= 0 or lead_ns < minimum_lead_ns:
                     app.statistics.increment("tdd_opportunities_missed")
+                    app.statistics.increment("tx_lead_deferrals")
                     queued.next_attempt = app.monotonic_clock()
                     app.link.requeue(queued)
                     return
@@ -155,6 +149,7 @@ def transmit_one(app: RadioApp) -> None:
                 app.statistics.increment("scheduled_tdd_transmissions")
         else:
             app.sdr.transmit(samples)
+        app.statistics.timing.finish("radio_transmit_ms", submit_started)
         app._last_tx_end = app.monotonic_clock()
         if app.config.link.tdd_period_seconds > 0:
             period = app.config.link.tdd_period_seconds
@@ -181,11 +176,16 @@ def transmit_one(app: RadioApp) -> None:
             samples=len(samples),
             airtime_seconds=len(samples) / app.config.sdr.sample_rate,
         )
+    except TransmitDeadlineError:
+        # The adapter guarantees no samples were submitted. Keep DATA cached;
+        # SYNC is re-encoded next time so its authenticated timestamp stays true.
+        app.statistics.increment("tx_lead_deferrals")
+        queued.next_attempt = app.monotonic_clock()
+        app.link.requeue(queued)
     except (OSError, ValueError) as exc:
         LOG.error("radio transmission failed: %s", exc)
         app.statistics.increment("transmit_errors")
-        queued.next_attempt = app.monotonic_clock() + app.config.link.backoff_max_seconds
-        app.link.requeue(queued)
+        app.behavior.transmit_failed(app, queued)
 
 
 def tdd_transmit_allowed(app: RadioApp) -> bool:
@@ -245,7 +245,8 @@ def tdd_burst_fits(
     # The SDR keeps a short tail in its host/FPGA FIFO after writeStream
     # returns.  Include that drain margin in slot admission; otherwise a
     # packet that technically fits can still occupy the peer's guard time.
-    airtime = sample_count / app.config.sdr.sample_rate + 0.001
+    total_samples = sample_count + app.processing.tx_idle_samples(app.config.sdr)
+    airtime = total_samples / app.config.sdr.sample_rate + 0.001
     if app.config.link.hardware_timed_io and target_leader_ns is None:
         airtime += (
             app.config.link.hardware_timed_tx_lead_seconds

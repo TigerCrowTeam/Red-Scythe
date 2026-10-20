@@ -11,7 +11,13 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from packet_radio.modems import BPSKModem, GMSKModem, Modem, MSKModem, QPSKModem, StreamingModem
-from packet_radio.modems.burst import QPSK_TRAINING, TRAINING
+from packet_radio.modems.burst import (
+    QPSK_TRAINING,
+    TRAINING,
+    BurstEnvelope,
+    BurstProcessing,
+    PacketProtection,
+)
 from packet_radio.modems.fsk import FSK2Modem
 
 if TYPE_CHECKING:
@@ -20,18 +26,18 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class Waveform:
-    build: Callable[["SDRConfig"], Modem]
+    build: Callable[["SDRConfig", BurstProcessing], Modem]
     bits_per_symbol: int
     training: bytes
     burst_format: str
 
 
 WAVEFORMS = {
-    "bpsk": Waveform(lambda c: _make_psk(c, BPSKModem), 1, TRAINING, "bpsk-burst-v1"),
-    "qpsk": Waveform(lambda c: _make_psk(c, QPSKModem), 2, QPSK_TRAINING, "qpsk-burst-v1"),
-    "gmsk": Waveform(lambda c: _make_gmsk(c), 1, QPSK_TRAINING, "gmsk-burst-v1"),
-    "msk": Waveform(lambda c: _make_msk(c), 1, TRAINING, "msk-burst-v1"),
-    "2fsk": Waveform(lambda c: _make_fsk(c), 1, TRAINING, "2fsk-burst-v1"),
+    "bpsk": Waveform(lambda c, p: _make_psk(c, BPSKModem, p), 1, TRAINING, "bpsk-burst-v1"),
+    "qpsk": Waveform(lambda c, p: _make_psk(c, QPSKModem, p), 2, QPSK_TRAINING, "qpsk-burst-v1"),
+    "gmsk": Waveform(lambda c, p: _make_gmsk(c, p), 1, QPSK_TRAINING, "gmsk-burst-v1"),
+    "msk": Waveform(lambda c, p: _make_msk(c, p), 1, TRAINING, "msk-burst-v1"),
+    "2fsk": Waveform(lambda c, p: _make_fsk(c, p), 1, TRAINING, "2fsk-burst-v1"),
 }
 
 
@@ -65,7 +71,10 @@ def samples_per_symbol(name: str, sample_rate: float, bit_rate_bps: float) -> in
 
 
 def make_modem(
-    config: "SDRConfig", *, candidate_validator: Callable[[bytes], bool] | None = None
+    config: "SDRConfig",
+    *,
+    candidate_validator: Callable[[bytes], bool] | None = None,
+    processing: BurstProcessing | None = None,
 ) -> "Modem":
     if config.modulation != "gmsk" and (
         config.gaussian_bt is not None or config.gaussian_span_symbols is not None
@@ -74,14 +83,27 @@ def make_modem(
     definition = waveform(config.modulation)
     if definition.bits_per_symbol > 1 and config.bit_repetitions != 1:
         raise ValueError("QPSK requires bit_repetitions=1")
-    modem = definition.build(config)
+    if processing is None:
+        processing = BurstProcessing(
+            PacketProtection(config.fec_interleaver_depth, config.rs_parity_bytes),
+            BurstEnvelope(definition.training),
+        )
+    supported = getattr(processing.envelope, "supported_modulations", tuple(WAVEFORMS))
+    if config.modulation not in supported:
+        raise ValueError("selected envelope is unsupported for this modulation")
+    if getattr(processing.envelope, "bit_order", "big") != "big" and config.modulation != "2fsk":
+        raise ValueError("configurable bit order is currently supported only for 2FSK")
+    modem = definition.build(config, processing)
     modem.candidate_validator = candidate_validator
     return modem
 
 
-def _make_psk(config: "SDRConfig", kind: type[StreamingModem]) -> Modem:
+def _make_psk(
+    config: "SDRConfig", kind: type[StreamingModem], processing: BurstProcessing
+) -> Modem:
     return kind(
         config.samples_per_symbol,
+        processing=processing,
         sample_rate=config.sample_rate,
         interleaver_depth=config.fec_interleaver_depth,
         bit_repetitions=config.bit_repetitions,
@@ -91,11 +113,12 @@ def _make_psk(config: "SDRConfig", kind: type[StreamingModem]) -> Modem:
     )
 
 
-def _make_fsk(config: "SDRConfig") -> Modem:
+def _make_fsk(config: "SDRConfig", processing: BurstProcessing) -> Modem:
     if config.frequency_deviation_hz is None:
         raise ValueError("2FSK requires frequency_deviation_hz")
     return FSK2Modem(
         config.samples_per_symbol,
+        processing=processing,
         frequency_deviation_hz=config.frequency_deviation_hz,
         sample_rate=config.sample_rate,
         interleaver_depth=config.fec_interleaver_depth,
@@ -105,11 +128,12 @@ def _make_fsk(config: "SDRConfig") -> Modem:
     )
 
 
-def _make_msk(config: "SDRConfig") -> Modem:
+def _make_msk(config: "SDRConfig", processing: BurstProcessing) -> Modem:
     if config.frequency_deviation_hz is not None:
         raise ValueError("MSK derives frequency deviation from bit rate; omit the override")
     return MSKModem(
         config.samples_per_symbol,
+        processing=processing,
         sample_rate=config.sample_rate,
         interleaver_depth=config.fec_interleaver_depth,
         bit_repetitions=config.bit_repetitions,
@@ -118,13 +142,14 @@ def _make_msk(config: "SDRConfig") -> Modem:
     )
 
 
-def _make_gmsk(config: "SDRConfig") -> Modem:
+def _make_gmsk(config: "SDRConfig", processing: BurstProcessing) -> Modem:
     if config.frequency_deviation_hz is not None:
         raise ValueError("GMSK derives frequency deviation from bit rate; omit the override")
     if config.gaussian_bt is None or config.gaussian_span_symbols is None:
         raise ValueError("GMSK requires gaussian_bt and gaussian_span_symbols")
     return GMSKModem(
         config.samples_per_symbol,
+        processing=processing,
         sample_rate=config.sample_rate,
         gaussian_bt=config.gaussian_bt,
         gaussian_span_symbols=config.gaussian_span_symbols,

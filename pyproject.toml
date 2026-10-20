@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "packet-radio"
-version = "1.0.0"
+version = "1.1.0"
 description = "A general-purpose packet radio using direct Ettus UHD"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -41,6 +41,8 @@ include = ["packet_radio*"]
 "share/packet-radio/docs" = ["docs/*.md"]
 "share/packet-radio/configs/examples" = ["configs/examples/*.yaml"]
 "share/packet-radio/configs/bench" = ["configs/bench/*.yaml"]
+"share/packet-radio/configs/profiles" = ["configs/profiles/*.yaml"]
+"share/packet-radio/configs/v1_1" = ["configs/v1_1/*.yaml"]
 "share/packet-radio/tools" = ["tools/*.py"]
 
 [tool.pytest.ini_options]

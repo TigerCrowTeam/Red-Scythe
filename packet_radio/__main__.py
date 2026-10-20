@@ -1,6 +1,6 @@
 """Start the radio from a YAML profile and command-line overrides.
 
-main loads the configuration, requires authentication unless explicitly disabled,
+main loads the configuration, enforces format-specific authentication rules,
 applies status options, configures logging and calls app.run. Startup and runtime
 errors are reported as command-line failures.
 """
@@ -18,6 +18,7 @@ from packet_radio.config import load_config
 def main() -> None:
     parser = argparse.ArgumentParser(description="General-purpose SDR packet radio")
     parser.add_argument("--config", required=True, help="path to YAML configuration")
+    parser.add_argument("--peer-config", help="second channel profile on the same X310")
     parser.add_argument(
         "--status",
         choices=("off", "text", "json"),
@@ -33,10 +34,20 @@ def main() -> None:
         action="store_true",
         help="allow insecure operation without authentication (isolated bench use only)",
     )
+    parser.add_argument(
+        "--timing-diagnostics",
+        action="store_true",
+        help="include bounded timing summaries in status snapshots",
+    )
     args = parser.parse_args()
+    timing_options = {"timing_diagnostics": True} if args.timing_diagnostics else {}
     try:
         config = load_config(args.config)
-        if config.authentication.private_key_file is None and not args.allow_unauthenticated:
+        if (
+            config.packet_format == "generic-v5"
+            and config.authentication.private_key_file is None
+            and not args.allow_unauthenticated
+        ):
             raise ValueError(
                 "authentication.private_key_file is required; use --allow-unauthenticated only on an isolated bench"
             )
@@ -58,7 +69,29 @@ def main() -> None:
             level=getattr(logging, config.log_level.upper(), logging.INFO),
             format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         )
-        run(config)
+        if args.peer_config is None:
+            run(config, **timing_options)
+        else:
+            from packet_radio.hardware.shared import run_pair
+
+            peer = load_config(args.peer_config)
+            if (
+                peer.packet_format == "generic-v5"
+                and peer.authentication.private_key_file is None
+                and not args.allow_unauthenticated
+            ):
+                raise ValueError("peer authentication requires keys or --allow-unauthenticated")
+            peer_status = replace(
+                peer.status,
+                output=peer.status.output if args.status is None else args.status,
+                interval_seconds=(
+                    peer.status.interval_seconds
+                    if args.status_interval is None
+                    else args.status_interval
+                ),
+                http_enabled=False if args.no_status_http else peer.status.http_enabled,
+            )
+            run_pair([config, replace(peer, status=peer_status)], **timing_options)
     except (OSError, RuntimeError, ValueError) as exc:
         parser.exit(1, f"packet-radio: {exc}\n")
 

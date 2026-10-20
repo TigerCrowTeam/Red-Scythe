@@ -15,6 +15,9 @@ from .base import StreamingModem
 from .burst import QPSK_TRAINING
 from .fec import UncorrectableFECError
 
+# Arrival, score and the alignment-specific views needed to decode a candidate.
+_Candidate = tuple[int, float, int, int, np.ndarray]
+
 
 class QPSKModem(StreamingModem):
     """Gray-coded coherent QPSK modem with its own acquisition training word."""
@@ -30,7 +33,7 @@ class QPSKModem(StreamingModem):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._training_bits = np.unpackbits(np.frombuffer(QPSK_TRAINING, dtype=np.uint8))
+        self._training_bits = np.unpackbits(np.frombuffer(self.envelope.training, dtype=np.uint8))
         self._preamble_bits = np.concatenate((self._training_bits, self._sync_bits))
 
     @staticmethod
@@ -55,7 +58,7 @@ class QPSKModem(StreamingModem):
     def modulate(self, payload: bytes) -> np.ndarray:
         if len(payload) > self.max_frame:
             raise ValueError("frame exceeds modem limit")
-        wire = self.envelope.encode(self.protection.encode(payload))
+        wire = self.processing.encode(payload)
         bits = np.unpackbits(np.frombuffer(wire, dtype=np.uint8))
         if self.bit_repetitions > 1:
             bits = np.repeat(bits, self.bit_repetitions)
@@ -115,6 +118,7 @@ class QPSKModem(StreamingModem):
             else corrected
         )
 
+        hypotheses: list[_Candidate] = []
         rejected: tuple[bytes, int, float, int, float] | None = None
         failed: tuple[float, float, int] | None = None
         incomplete_score = float("-inf")
@@ -147,7 +151,21 @@ class QPSKModem(StreamingModem):
             starts = starts[: self._MAX_ACQUISITION_CANDIDATES]
             for start_raw in starts:
                 start = int(start_raw)
-                score = float(scores[start])
+                hypotheses.append(
+                    (timing + start * self.sps, float(scores[start]), timing, start, symbols)
+                )
+        # Rank alignment quality only within a burst. Consuming a later,
+        # higher-scoring frame first would silently discard an earlier ACK.
+        hypotheses.sort(key=lambda item: item[0])
+        groups: list[list[_Candidate]] = []
+        for hypothesis in hypotheses:
+            if not groups or hypothesis[0] - groups[-1][0][0] > 2 * self.sps:
+                groups.append([])
+            groups[-1].append(hypothesis)
+        for group in groups:
+            for _, score, timing, start, symbols in sorted(
+                group, key=lambda item: item[1], reverse=True
+            ):
                 observed = symbols[start : start + len(preamble_symbols)]
                 aligned = observed * np.conj(preamble_symbols)
                 aligned_index = np.arange(len(aligned), dtype=np.float64)
@@ -190,24 +208,25 @@ class QPSKModem(StreamingModem):
                 for track in (False, True):
                     candidate = (
                         self._decision_directed_track(
-                            decided[: data_symbol_start + 8], data_symbol_start
+                            decided[: data_symbol_start + self.length_bits // 2], data_symbol_start
                         )
                         if track
                         else decided
                     )
                     bits = self._demap_symbols(candidate)
                     data_bit_start = data_symbol_start * 2
-                    if len(bits) < data_bit_start + 16:
+                    if len(bits) < data_bit_start + self.length_bits:
                         incomplete_score = max(incomplete_score, score)
                         continue
-                    length = int.from_bytes(
-                        np.packbits(bits[data_bit_start : data_bit_start + 16]).tobytes(),
-                        "big",
+                    length = self.envelope.body_size(
+                        np.packbits(
+                            bits[data_bit_start : data_bit_start + self.length_bits]
+                        ).tobytes(),
                     )
                     maximum = self.protection.encoded_size(self.max_frame)
                     if length > maximum:
                         continue
-                    end_bit = data_bit_start + 16 + length * 8
+                    end_bit = data_bit_start + self.length_bits + length * 8
                     if len(decided) * 2 < end_bit:
                         incomplete_score = max(incomplete_score, score)
                         continue
@@ -219,7 +238,9 @@ class QPSKModem(StreamingModem):
                             self._decision_directed_track(decided[:end_symbol], data_symbol_start)
                         )
                     consumed = int(np.ceil(timing + end_symbol * self.sps))
-                    encoded = np.packbits(bits[data_bit_start + 16 : end_bit]).tobytes()
+                    encoded = np.packbits(
+                        bits[data_bit_start + self.length_bits : end_bit]
+                    ).tobytes()
                     try:
                         result = self.protection.decode(encoded)
                     except (UncorrectableFECError, ReedSolomonError):
