@@ -1,12 +1,12 @@
 profile_version: 1
 id: simple-2fsk-100k-v1
 revision: 1
-reference: docs/CONFIGURATION.md Step 7 reference rates, revision 1
+reference: docs/CONFIGURATION.md#reference-rates
 qualification: short-conducted
 limitations:
 - Project-defined rate reference; no target-radio interoperability claim.
 - Integral sampling only; no resampling or sample-clock tracking.
-- See MODULATION_RESULTS.md for measured traffic and receiver impairment limits.
+- See docs/CONFIGURATION.md#reference-rates for traffic and receiver impairment limits.
 - Independent-host, hopping at this rate and sustained qualification remain unqualified.
 waveform:
   modulation: 2fsk

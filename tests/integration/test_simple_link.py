@@ -218,7 +218,7 @@ def test_gap_interval_turnaround_and_airtime_queue_limit():
 @pytest.mark.parametrize(
     "change",
     [
-        {"sdr": SDRConfig()},
+        {"sdr": SDRConfig(modulation="unknown")},
         {"link": LinkConfig(hardware_clock_sync=True, hardware_timed_io=True)},
         {"link": LinkConfig(tdd_period_seconds=1)},
         {"frequency": FrequencyConfig((915e6, 916e6), 0, guard_seconds=0)},

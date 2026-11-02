@@ -41,6 +41,7 @@ class DerivedValues:
     frequency_deviation_hz: float | None
     hop_rate_hz: float | None
     profile_sha256: str
+    effective_payload_bytes: int
 
 
 @dataclass(frozen=True)
@@ -74,6 +75,19 @@ def _issue(exc: Exception, scope: str = "configuration") -> ValidationIssue:
     message = str(exc)
     # Coupled constraints intentionally highlight all participating controls.
     rules = (
+        ("payload_sizing must", ("profile.packet.payload_sizing",)),
+        (
+            "automatic payload sizing requires",
+            ("profile.packet.payload_sizing", "profile.frequency.mode", "derived.length_mode"),
+        ),
+        (
+            "automatic hopping requires",
+            ("profile.frequency.guard_seconds", "derived.hop_rate"),
+        ),
+        (
+            "reduced hopping guards require",
+            ("profile.frequency.guard_seconds", "node.hardware.device.type"),
+        ),
         ("sync must contain", ("profile.packet.frame.sync",)),
         (
             "expanded preamble",
@@ -100,6 +114,10 @@ def _issue(exc: Exception, scope: str = "configuration") -> ValidationIssue:
         (
             "sample rate/bandwidth",
             ("profile.waveform.sample_rate_hz", "profile.waveform.bandwidth_hz"),
+        ),
+        (
+            "X310/UBX-160 hop",
+            ("profile.frequency.frequencies_hz", "profile.waveform.bandwidth_hz"),
         ),
         (
             "bandwidth",
@@ -287,6 +305,7 @@ class RadioDraft:
                 if len(config.frequency.frequencies_hz) > 1
                 else None,
                 profile_fingerprint(config.emulation),
+                config.endpoint.max_payload_bytes,
             )
             return ValidationReport(
                 config=config, derived=derived, effective=configuration_snapshot(config)
@@ -294,17 +313,20 @@ class RadioDraft:
         except (ValueError, TypeError, KeyError, OverflowError) as exc:
             return ValidationReport(issues=(_issue(exc),))
 
-    def limits(self, key: str) -> InputLimits:
+    def limits(self, key: str, *, report: ValidationReport | None = None) -> InputLimits:
         """Resolve software bounds; invalid drafts retain static hints until corrected.
 
         No hardware range is fabricated offline. Discrete rate ratios, airtime and
         cross-field constraints still require validate(), even when a range fits.
+        A caller rendering several fields may supply its current validation snapshot
+        to avoid resolving the same profile for every field. Reports are not cached.
         """
         field = FIELDS[key]
         bounds = InputLimits(
             field.minimum, field.maximum, multiple_of=field.multiple_of, choices=field.choices
         )
-        report = self.validate()
+        if report is None:
+            report = self.validate()
         if not report.valid:
             return bounds
         assert report.config is not None
@@ -339,6 +361,13 @@ class RadioDraft:
                 0, min(bandwidth_limit, sample_limit), False, bandwidth_limit < sample_limit
             )
         if key == "derived.hop_rate":
+            from packet_radio.hop_budget import automatic, maximum_hop_rate
+
+            if automatic(config):
+                maximum = maximum_hop_rate(config)
+                if sdr.device.get("type") != "x300":
+                    maximum = min(maximum, 1.0)
+                return InputLimits(0, maximum, False)
             maximum = 2.0 if sdr.device.get("type") == "x300" else 1.0
             if len(config.frequency.frequencies_hz) > 1:
                 assert report.derived is not None

@@ -42,6 +42,7 @@ def _root_raised_cosine(sps: int, rolloff: float, span_symbols: int) -> np.ndarr
 
 
 class Modem(ABC):
+    max_frame: int
     timing: TimingDiagnostics
     candidate_validator: Callable[[bytes], bool] | None
     fec_corrected_bits: int
@@ -233,7 +234,7 @@ class StreamingModem(Modem):
             self._burst_active = True
         # Live SDR streams have a low idle-noise floor and explicit gaps between
         # bursts. Searching every growing partial burst repeats expensive work.
-        # BPSK/FSK can schedule a search from a candidate's length; other waveforms
+        # BPSK/QPSK/FSK can schedule a search from a candidate's length; other waveforms
         # retain the idle/full-buffer trigger. Unit-amplitude simulation/replay
         # streams retain immediate streaming decode.
         live_burst = (

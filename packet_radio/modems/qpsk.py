@@ -23,6 +23,7 @@ class QPSKModem(StreamingModem):
     """Gray-coded coherent QPSK modem with its own acquisition training word."""
 
     training = QPSK_TRAINING
+    length_aware_live_search = True
 
     # A coarse fourth-power estimate can be biased by the B205's analog-shaped
     # rectangular transitions. The full-preamble phase fit below can recover a
@@ -35,6 +36,10 @@ class QPSKModem(StreamingModem):
         super().__init__(*args, **kwargs)
         self._training_bits = np.unpackbits(np.frombuffer(self.envelope.training, dtype=np.uint8))
         self._preamble_bits = np.concatenate((self._training_bits, self._sync_bits))
+        self._preamble_symbols = self._map_bits(self._preamble_bits)
+        self._preamble_conjugate = np.conj(self._preamble_symbols)
+        self._preamble_energy = float(np.vdot(self._preamble_symbols, self._preamble_symbols).real)
+        self._preamble_index = np.arange(len(self._preamble_symbols), dtype=np.float64)
 
     @staticmethod
     def _map_bits(bits: np.ndarray) -> np.ndarray:
@@ -96,7 +101,7 @@ class QPSKModem(StreamingModem):
         return tracked
 
     def _find_frame(self) -> tuple[bytes | None, int] | None:
-        preamble_symbols = self._map_bits(self._preamble_bits)
+        preamble_symbols = self._preamble_symbols
         minimum_symbols = len(preamble_symbols) + 8
         if len(self._samples) < minimum_symbols * self.sps:
             return None
@@ -117,6 +122,16 @@ class QPSKModem(StreamingModem):
             if self._rrc_taps is not None
             else corrected
         )
+        # Compute overlapping rectangular symbol averages once for all timing
+        # offsets. Double precision keeps subtraction accurate after long bursts.
+        averaged = None
+        if self._rrc_taps is None:
+            cumulative = np.empty(len(matched) + 1, dtype=np.complex128)
+            cumulative[0] = 0
+            np.cumsum(matched, out=cumulative[1:])
+            averaged = ((cumulative[self.sps :] - cumulative[: -self.sps]) / self.sps).astype(
+                np.complex64
+            )
 
         hypotheses: list[_Candidate] = []
         rejected: tuple[bytes, int, float, int, float] | None = None
@@ -127,19 +142,23 @@ class QPSKModem(StreamingModem):
             if usable < minimum_symbols:
                 continue
             if self._rrc_taps is None:
-                block = matched[timing : timing + usable * self.sps]
-                symbols = block.reshape(-1, self.sps).mean(axis=1).astype(np.complex64)
+                assert averaged is not None
+                symbols = averaged[timing : timing + usable * self.sps : self.sps]
             else:
                 symbols = matched[timing : timing + usable * self.sps : self.sps].astype(
                     np.complex64
                 )
             correlation = np.correlate(symbols, preamble_symbols, mode="valid")
-            energy = np.convolve(
-                np.abs(symbols) ** 2,
-                np.ones(len(preamble_symbols), dtype=np.float32),
-                mode="valid",
+            # A rolling energy sum is linear in the buffer size, independent
+            # of preamble length; retain every timing offset and candidate.
+            cumulative_energy = np.empty(len(symbols) + 1, dtype=np.float64)
+            cumulative_energy[0] = 0
+            np.cumsum(np.abs(symbols) ** 2, out=cumulative_energy[1:])
+            energy = (
+                cumulative_energy[len(preamble_symbols) :]
+                - cumulative_energy[: -len(preamble_symbols)]
             )
-            denominator = np.sqrt(energy * float(np.vdot(preamble_symbols, preamble_symbols).real))
+            denominator = np.sqrt(np.maximum(energy, 0) * self._preamble_energy)
             scores = np.divide(
                 np.abs(correlation),
                 denominator,
@@ -167,8 +186,8 @@ class QPSKModem(StreamingModem):
                 group, key=lambda item: item[1], reverse=True
             ):
                 observed = symbols[start : start + len(preamble_symbols)]
-                aligned = observed * np.conj(preamble_symbols)
-                aligned_index = np.arange(len(aligned), dtype=np.float64)
+                aligned = observed * self._preamble_conjugate
+                aligned_index = self._preamble_index
                 aligned_phase = np.unwrap(np.angle(aligned)).astype(np.float64)
                 weights = np.abs(aligned).astype(np.float64) ** 2
                 weight_sum = float(np.sum(weights))
@@ -216,18 +235,24 @@ class QPSKModem(StreamingModem):
                     bits = self._demap_symbols(candidate)
                     data_bit_start = data_symbol_start * 2
                     if len(bits) < data_bit_start + self.length_bits:
+                        self._await_frame_samples(
+                            timing + ((data_bit_start + self.length_bits + 1) // 2) * self.sps
+                        )
                         incomplete_score = max(incomplete_score, score)
                         continue
-                    length = self.envelope.body_size(
-                        np.packbits(
-                            bits[data_bit_start : data_bit_start + self.length_bits]
-                        ).tobytes(),
-                    )
+                    length_field = np.packbits(
+                        bits[data_bit_start : data_bit_start + self.length_bits]
+                    ).tobytes()
+                    try:
+                        length = self.envelope.body_size(length_field)
+                    except ValueError:
+                        continue
                     maximum = self.protection.encoded_size(self.max_frame)
                     if length > maximum:
                         continue
                     end_bit = data_bit_start + self.length_bits + length * 8
                     if len(decided) * 2 < end_bit:
+                        self._await_frame_samples(timing + ((end_bit + 1) // 2) * self.sps)
                         incomplete_score = max(incomplete_score, score)
                         continue
                     end_symbol = (end_bit + 1) // 2
@@ -241,9 +266,14 @@ class QPSKModem(StreamingModem):
                     encoded = np.packbits(
                         bits[data_bit_start + self.length_bits : end_bit]
                     ).tobytes()
+                    # Full-body tracking may refine the length decisions too.
+                    # Restore the field from the same final decisions as the CRC body.
+                    length_field = np.packbits(
+                        bits[data_bit_start : data_bit_start + self.length_bits]
+                    ).tobytes()
                     try:
-                        result = self.protection.decode(encoded)
-                    except (UncorrectableFECError, ReedSolomonError):
+                        result = self.processing.decode_body(length_field, encoded)
+                    except (ValueError, UncorrectableFECError, ReedSolomonError):
                         if failed is None or corrected_score > failed[0]:
                             failed = (float(corrected_score), score, consumed)
                         continue

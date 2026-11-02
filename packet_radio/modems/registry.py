@@ -34,10 +34,10 @@ class Waveform:
 
 WAVEFORMS = {
     "bpsk": Waveform(lambda c, p: _make_psk(c, BPSKModem, p), 1, TRAINING, "bpsk-burst-v1"),
-    "qpsk": Waveform(lambda c, p: _make_psk(c, QPSKModem, p), 2, QPSK_TRAINING, "qpsk-burst-v1"),
-    "gmsk": Waveform(lambda c, p: _make_gmsk(c, p), 1, QPSK_TRAINING, "gmsk-burst-v1"),
-    "msk": Waveform(lambda c, p: _make_msk(c, p), 1, TRAINING, "msk-burst-v1"),
     "2fsk": Waveform(lambda c, p: _make_fsk(c, p), 1, TRAINING, "2fsk-burst-v1"),
+    "msk": Waveform(lambda c, p: _make_msk(c, p), 1, TRAINING, "msk-burst-v1"),
+    "gmsk": Waveform(lambda c, p: _make_gmsk(c, p), 1, QPSK_TRAINING, "gmsk-burst-v1"),
+    "qpsk": Waveform(lambda c, p: _make_psk(c, QPSKModem, p), 2, QPSK_TRAINING, "qpsk-burst-v1"),
 }
 
 

@@ -143,7 +143,7 @@ phase, and estimates the threshold from known preamble tones. Acquisition repeat
 for each burst. It is a noncoherent discriminator receiver, not an optimal coherent
 MSK detector; continuous sample-clock drift tracking is not claimed.
 
-The Step 7 characterization was fixed before receiver tuning: unit-magnitude IQ,
+The MSK characterization was fixed before receiver tuning: unit-magnitude IQ,
 independent Gaussian noise with standard deviation 0.08 on each I/Q component,
 seed 7007, offsets -750/0/+750 Hz, rates 125/250/500 kbit/s at 2 Msps, and payloads
 1/64/256/1024 bytes. Additional noiseless independent-reference checks use all
@@ -191,7 +191,7 @@ burst-start timestamp. It resets acquisition on sample discontinuities. This
 receiver is not a coherent/Viterbi detector and does not claim continuous
 sample-clock drift tracking.
 
-The Step 8 software matrix was fixed before receiver tuning: seed 8008,
+The GMSK software matrix was fixed before receiver tuning: seed 8008,
 unit-magnitude IQ, independent Gaussian noise standard deviation 0.08 per I/Q
 component, offsets -750/0/+750 Hz, rates 125/250/500 kbit/s at 2 Msps, and payloads
 1/64/256/1024 bytes, across both BT values and both spans. Independent scalar

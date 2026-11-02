@@ -108,7 +108,10 @@ class Entries(Vertical):
 
 class FieldRow(Vertical):
     def __init__(self, field: FieldSpec, session, hint=""):
-        super().__init__(id="row-" + field_id(field.key), classes="field-row")
+        super().__init__(
+            id="row-" + field_id(field.key),
+            classes="field-row" + (" compact-field" if field.access != "editable" else ""),
+        )
         self.field = field
         self.session = session
         self.hint = hint
@@ -116,17 +119,21 @@ class FieldRow(Vertical):
     def compose(self) -> ComposeResult:
         field, session = self.field, self.session
         value = session.value(field.key)
-        yield Static(
-            field.label + (f" ({field.unit})" if field.unit else ""),
-            classes="field-label",
-            markup=False,
-        )
+        label = field.label + (f" ({field.unit})" if field.unit else "")
         ident = field_id(field.key)
         if field.access != "editable":
-            yield Static(
-                format_value(field.key, value) or "Unavailable until valid", id=ident, markup=False
-            )
-        elif field.editor in ("frequency_table", "device_arguments", "key_paths"):
+            with Horizontal(classes="compact-value-row"):
+                yield Static(label + ":", classes="compact-label", markup=False)
+                yield Static(
+                    format_value(field.key, value) or "Unavailable until valid",
+                    id=ident,
+                    classes="compact-value",
+                    markup=False,
+                )
+            yield Static("", id="error-" + ident, classes="field-error", markup=False)
+            return
+        yield Static(label, classes="field-label", markup=False)
+        if field.editor in ("frequency_table", "device_arguments", "key_paths"):
             yield Entries(field.key, value or {})
         elif field.editor == "toggle":
             yield Checkbox("Enabled", bool(value), id=ident)

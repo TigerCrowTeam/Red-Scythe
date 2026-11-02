@@ -284,3 +284,26 @@ def test_duplicate_yaml_keys_are_rejected(tmp_path):
     path.write_text("schema_version: 2\nschema_version: 2\n")
     with pytest.raises(ValueError, match="duplicate YAML"):
         RadioDraft.load(path)
+
+
+def test_rendered_limits_reuse_one_validation_snapshot(monkeypatch):
+    subject = draft()
+    report = subject.validate()
+    keys = (
+        "profile.waveform.bit_rate_bps",
+        "profile.waveform.sample_rate_hz",
+        "profile.waveform.bandwidth_hz",
+        "profile.waveform.frequency_deviation_hz",
+        "derived.hop_rate",
+    )
+    expected = {key: subject.limits(key) for key in keys}
+
+    def unexpected_validation():
+        raise AssertionError("rendering an existing report must not resolve it again")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(subject, "validate", unexpected_validation)
+        assert {key: subject.limits(key, report=report) for key in keys} == expected
+    # A later edit must still be validated when no snapshot is supplied.
+    subject.set("profile.waveform.bandwidth_hz", 1500000)
+    assert subject.limits("profile.waveform.frequency_deviation_hz").maximum == 500000

@@ -145,7 +145,7 @@ for outer Reed–Solomon protection. Set this field identically on both peers;
 older QPSK profiles used zero, so update both ends together. Existing captures
 retain their recorded parity setting and remain replayable.
 Stop other radio processes before using them. A signed maximum-size QPSK burst
-occupies 39.040 ms at this profile. See `MODULATION_RESULTS.md` for measured scope.
+occupies 39.040 ms at this profile. This airtime is specific to this profile.
 
 For BPSK/QPSK, RRC rolloff zero selects rectangular pulses. Nonzero rolloff enables the existing
 root-raised-cosine shaping and matched receive filter. The rolloff must be 0..1 and
@@ -212,8 +212,8 @@ are not the YAML schema.
 
 `packet_radio/modems/registry.py` owns waveform definitions and construction. Live TX, live RX,
 validation and replay use that factory through `protocol/registry.py`, which selects
-the packet codec, link behavior and burst/protection composition. Only generic-v5
-is currently registered; the Step 2 refactor does not add schema options. `Modem` defines modulation, streaming and
+the packet codec, link behavior and burst/protection composition. Schema 1 selects
+generic-v5; schema 2 supports generic-v5 and simple-frame-v1. `Modem` defines modulation, streaming and
 timestamped receive, full sample/byte counts and `reset()`; FEC diagnostic counters
 remain cumulative across reset. A reset discards partial frames, burst acquisition,
 noise history and timestamp history while retaining the configured waveform.
@@ -264,8 +264,7 @@ finite spectral support. At 500 kbit/s with 250 kHz deviation, choose at least
 Captures store the deviation and `2fsk-burst-v1` identifier. Replay requires the
 recorded deviation; it does not infer it from bit rate. Complete sample counts
 include all training, envelope and protection bytes; 2FSK has no filter tail.
-See [modulation results](../MODULATION_RESULTS.md) for receiver assumptions,
-frozen test conditions and qualification status.
+See [payload tables](../MODULATION_RESULTS.md) for calculated hopping capacity.
 
 The 2FSK receiver acquires integer symbol timing independently for each burst and
 estimates frequency midpoint from training. It does not provide fractional
@@ -285,8 +284,7 @@ not a claim that the waveform has finite spectral support. The 500 kbit/s softwa
 characterization therefore needs at least 1.25 MHz bandwidth in a complete profile.
 
 Paired profiles are `configs/examples/peer-*-msk.yaml` and
-`configs/bench/peer-*-msk.yaml`. Hardware qualification status is recorded only in
-`MODULATION_RESULTS.md`. Capture manifests use `msk-burst-v1` and retain a null
+`configs/bench/peer-*-msk.yaml`. Capture manifests use `msk-burst-v1` and retain a null
 frequency-deviation override; replay derives the value from the stored rate.
 
 ## GMSK settings
@@ -346,13 +344,12 @@ can sustain an otherwise valid configuration.
 | Hardware/host | Other UHD devices/hosts require separate validation | Two B205mini, one Ubuntu 26.04.1 workstation, UHD 4.9.0.1, Python 3.14.4 |
 
 These are validation constraints, not promises of RF performance throughout the
-range. The measured profiles and workload-specific latency/throughput are in
-`MODULATION_RESULTS.md`. Nominal bit rate is not UDP goodput. Generic examples
+range. Nominal bit rate is not UDP goodput. Generic examples
 use conservative gains and simpler scheduling, and are templates rather than
-measured bench profiles. Independent-host operation, over-air range, hopping,
-live reconfiguration, arbitrary framing, automatic USB hotplug recovery and fixed
-hardware-slot scheduling are not qualified for version 1.0.0. QPSK is maintained
-and locally tested but is outside the first-version modulation focus.
+measured bench profiles. Independent-host operation, over-air range, live
+reconfiguration, automatic USB hotplug recovery and fixed hardware-slot scheduling
+remain unqualified. Simple-frame hopping and configurable framing are available
+under the version 1.1 contracts below; QPSK is supported alongside the other modes.
 
 ## Upgrading to packet-radio 1.0.0
 
@@ -381,10 +378,10 @@ settings when replaying old captures.
 
 ## Version 1.1: configurable framing API
 
-Step 3 implements `packet_radio.protocol.simple.FrameSettings`, `SimpleFrameCodec`
+`packet_radio.protocol.simple` supplies `FrameSettings`, `SimpleFrameCodec`
 and `make_frame_modem`. This is a Python API for codec/waveform work, not a new
-schema-1 YAML option. Schema-1 YAML still registers only `generic-v5`. Step 4 adds an explicit live
-Python profile selection below; Step 5 adds schema-2 reusable profiles further below.
+schema-1 YAML option. Schema-1 YAML still registers only `generic-v5`. Explicit live
+Python profile selection and schema-2 reusable profiles are described below.
 The [frozen simple 2FSK contract](EMULATION_PROFILE.md) is reproduced by the defaults.
 Changing those defaults produces a custom variant, not the frozen profile.
 
@@ -448,8 +445,10 @@ packet CRC validation. `rs_parity_bytes=0` does not disable Hamming when selecte
 No CRC means no integrity check; only framing/length validation remains. It is a
 custom option and not the frozen reference profile's acceptance configuration.
 Likewise, configurable values are not a claim of RF qualification for every
-combination. This frame pipeline currently supports **2FSK only**. Attempts to
-use its envelope with BPSK/QPSK/MSK/GMSK fail rather than misencode it.
+combination. This frame pipeline supports **BPSK, 2FSK, MSK, GMSK and QPSK**, including
+fixed and hopping operation. Non-2FSK waveforms currently require big bit order;
+length/CRC byte order remains configurable. The GUI selects a waveform-appropriate
+32-byte preamble when modulation changes; both peers must use the same definition.
 
 The factory defaults to 2 Msps, 250 kbps and ±125 kHz deviation. Positive finite
 rates, integral samples/bit ≥4 and deviation below sample rate/4 are required.
@@ -473,7 +472,7 @@ only with a selected target's exact bit-level contract and independent vectors.
 
 ## Version 1.1: live simple link modes
 
-Step 4 integrates `SimpleProfile` into `RadioApp` through its explicit `processing`
+`SimpleProfile` integrates with `RadioApp` through its explicit `processing`
 argument. Existing schema-1 files and the `packet-radio` CLI still select generic-v5.
 Schema-2 YAML and capture format 3 now provide this selection and replay without
 source edits; see the reusable-profile section below. Recording with a manually
@@ -611,7 +610,7 @@ Set each node's UHD serial, gains and local ports for the intended hardware.
 The examples use zero gains and do not select either bench serial automatically.
 Both use existing UHD and modem implementations. The generic definition can select
 any of the five existing modulations when its waveform settings are compatible;
-the simple format currently supports only 2FSK.
+the simple format supports all five as well, including automatic hopping.
 
 ```bash
 packet-radio-validate configs/v1_1/peer-a-simple.yaml configs/v1_1/peer-b-simple.yaml
@@ -763,7 +762,7 @@ samples/frames; they do not retransmit RF or reproduce a host's transmit schedul
 Legacy capture formats **1 and 2 remain readable**, and the standalone legacy
 `CaptureRecorder` API still creates format 2 when no resolved configuration is
 supplied. Live simple recording requires schema 2. Captures are optional operational
-data; final qualification summaries still belong only in `MODULATION_RESULTS.md`.
+data, not a required part of normal operation.
 
 ## Version 1.1 frequency hopping
 
@@ -793,7 +792,7 @@ is `floor((UTC - epoch) / dwell_seconds)` modulo the sequence length. Epoch is a
 nonnegative POSIX timestamp in seconds; transmission is inhibited before it.
 Both peers must use the same table, sequence, epoch, dwell and guard.
 
-Hop rate is `1 / dwell_seconds`. Schema-2 profiles reject dwell below **0.5 s**,
+Hop rate is `1 / dwell_seconds`. With manual payload sizing, schema-2 profiles reject dwell below **0.5 s**,
 guard below **100 ms**, and guards occupying the whole dwell. Rates above 1 hop/s
 also require an explicit UHD `type: x300` device selection. These are conservative
 host stop/tune/restart limits, not the maximum capability of the hardware.
@@ -806,7 +805,7 @@ X310; set the address for your device. Qualification applies to the measured
 same-host X310/UBX arrangement, not all X300-series boards or separate hosts.
 Slower/intermediate settings, ping-pong, other tables and behavior overrides need
 their own qualification. Overrides receive a custom ID and `unqualified` metadata.
-See the exact measurement scope in [MODULATION_RESULTS.md](../MODULATION_RESULTS.md).
+Calculated capacity alone does not qualify a custom profile.
 
 At 2 hops/s the nominal TX window is 100–400 ms of each 500 ms dwell; actual
 readiness is later than 100 ms because the post-tune settling wait starts after
@@ -878,9 +877,9 @@ a distinct hopping workload; it does not replace the fixed simple profile's 5-pa
 and 17-second recovery acceptance gates in `EMULATION_PROFILE.md`. Timing observations
 use host clocks and device timestamps, not an independent RF analyzer.
 
-## Step 7 reference rates
+## Reference rates
 
-No target radio has been selected. Step 7 therefore defines a bounded, project-owned
+No target radio has been selected. The reference rates define a bounded, project-owned
 rate reference set rather than assuming a target's rates, shaping or timing rules.
 The new fixed-frequency simple 2FSK definitions and node pairs are:
 
@@ -935,14 +934,14 @@ until a target provides a reference and numerical acceptance limits.
 The conducted rate check uses the existing attenuated B205mini bench and runs one
 minute per direction at five 256-byte packets/second plus boundary/repeated payloads.
 It verifies submitted bytes/sample counts, timed burst gaps, exact delivery, stream
-errors, process CPU, decoder processing time and sampled queue depth. Results and
-limits are in `MODULATION_RESULTS.md`. These short rate checks do not replace the
+errors, process CPU, decoder processing time and sampled queue depth. These short
+rate checks do not replace the
 broader five-minute fixed-profile qualification contract or establish peak capacity.
 CPU numbers include the check's instrumentation; sampled queue depth is not an
 atomic queue high-water counter. No language rewrite or decoder optimization is
 justified solely by the new configurable rates.
 
-## Step 8 fidelity acceptance
+## Fidelity acceptance
 
 The fidelity reference is the project-defined simple framing contract at
 100/250/500 kbit/s (including the 250 kbit/s hopping profile) and the frozen
@@ -959,12 +958,12 @@ The following tolerances are fixed before running the new fidelity comparisons:
   must differ from the independent reference by no more than one FFT bin; integrated
   absolute normalized spectral-power error must be ≤1e-5. This is a digital IQ
   comparison, not a target spectral mask or calibrated conducted RF measurement.
-- Receiver tests retain Step 7's ±10 ppm clock error, ±750 Hz offset, component noise
+- Receiver tests retain the reference-rate ±10 ppm clock error, ±750 Hz offset, component noise
   standard deviation 0.04 and seed 1101. Missing timestamped blocks must not splice
   partial packets across a gap; bad CRC/length frames must not deliver altered bytes,
   and a following intact packet must decode exactly.
 - Simple link tests require the configured minimum gap/turnaround on the application
-  clock. Physical minimum RF turnaround is unmeasured. Hop timing retains Step 6's
+  clock. Physical minimum RF turnaround is unmeasured. Hop timing retains the
   1-second dwell, 100 ms guards, complete-burst admission and recorded conducted limits.
 - Conducted simple recovery mutes TX IQ for 17 seconds, intentionally loses one
   offered packet without retry, then requires the next intact packet within 5 seconds.
@@ -973,7 +972,7 @@ The following tolerances are fixed before running the new fidelity comparisons:
 
 Independent-host timing, calibrated RF spectrum/power, custom profile variants and
 actual-target interoperability remain unqualified. Optional reference vectors are
-inputs, not measurement reports; only final results belong in `MODULATION_RESULTS.md`.
+inputs, not proof of RF interoperability.
 
 Run the offline reference check from the checkout:
 
@@ -986,8 +985,8 @@ profile; it opens no SDR and writes no result files. Installed packages include 
 same tool under `share/packet-radio/tools`, and installation checks execute it there.
 Its spectrum measurements cover logical, unfiltered baseband bursts; hardware
 filters, images, leakage, absolute frequency/power and target spectral masks need
-separate equipment/reference measurements. See the fidelity status matrix in
-`MODULATION_RESULTS.md` before interpreting a passing result as RF interoperability.
+separate equipment/reference measurements. A passing offline check does not
+establish RF interoperability.
 
 On the established attenuated bench, `tools/simple_link_check.py` accepts
 `--interrupt-seconds 17` to test intentional no-retry loss and recovery in both
@@ -1043,8 +1042,7 @@ duplicate suppression. Hopping requires externally aligned UTC and permits decod
 frame captures only; raw IQ hopping capture is rejected. Two-host hopping, arbitrary
 fast hopping, non-integral resampling, calibrated RF fidelity and interoperability
 with a real target radio remain unqualified or deferred. The short fixed-simple
-checks do not establish sustained five-minute qualification. Consult
-[final results](../MODULATION_RESULTS.md) for exact durations and measured limits.
+checks do not establish sustained five-minute qualification.
 
 ### Shared X310 channels
 
@@ -1109,7 +1107,6 @@ generic/simple profiles are preserved.
 
 These new profiles remain marked `unqualified`: short conducted delivery checks
 do not establish sustained capacity or a clean stream under every workload.
-See the Step 5 measurements in [MODULATION_RESULTS.md](../MODULATION_RESULTS.md).
 
 ## UHD host transmit batching
 
@@ -1125,5 +1122,101 @@ multiplied by the streamer's transport packet size, reported in hardware status.
 The paired `configs/v1_1/peer-{a,b}-x310-qpsk.yaml` examples use 256 for the
 conducted X310 QPSK underflow mitigation. Other existing examples remain at 1.
 This setting is a host/device tuning choice, not evidence that all hardware or
-emulation profiles should use 256. See [UHD_SETUP.md](UHD_SETUP.md#uhd-transmit-batching)
-and the final QPSK measurements in [MODULATION_RESULTS.md](../MODULATION_RESULTS.md).
+emulation profiles should use 256. See [UHD_SETUP.md](UHD_SETUP.md#uhd-transmit-batching).
+
+
+## Automatic payload sizing
+
+For variable-length `simple-frame-v1` hopping, set `packet.payload_sizing` to
+`automatic`. Omitted settings retain `manual` behavior. `max_payload_bytes` stays
+an upper ceiling (1–1024 bytes); the resolved endpoint limit is calculated using
+actual codec sizes and modem sample counts, including framing, CRC, protection
+and padding. Fixed-length framing and fixed-frequency modes do not support this
+option. Both peers must resolve to the same payload limit.
+
+The usable airtime subtracts both guards, a host transition allowance (12 ms for
+explicit X300 selection, 40 ms otherwise), timed TX lead if enabled, transport
+idle, 1 ms drain margin, preparation (3 ms for X300, 10 ms otherwise), and a 6 ms
+end margin. The end margin leaves time for host delivery as well as RF completion.
+Runtime burst admission enforces the same margin. A binary search selects the
+largest payload under the ceiling that fits. No one-byte fit is a validation error.
+The GUI's rate bound uses the same budget with one byte, capped at **29 hops/s**.
+These allowances describe the measured implementation, not an absolute hardware
+limit or live calibration. Changed hosts, tables and loads need new measurements.
+
+Explicit `type: x300` with automatic sizing permits guards down to 1 ms when the
+calculated packet fits. Other devices retain at most 1 hop/s and guards of at
+least 100 ms. Manual profiles retain their existing dwell/guard limits. Automatic
+admission waits for both the local settling guard and the common peer-ready
+phase (transition allowance plus guard). Its tune-deadline counter checks that
+tuning completes within the transition allowance, leaving the full guard before
+that common phase. Fixed device timestamps and clock-read bounds prevent backend
+preparation from moving a burst across the trailing guard. A boundary that passes
+during input polling defers selection until retuning, without consuming the packet.
+
+The automatic X310 example uses 250 kbit/s 2FSK, 2 Msps, 1 ms guards, 8 ms TX lead,
+16-packet TX batches and a 1,024-byte ceiling. Its timing reserve is **32.032 ms**
+per dwell, plus the encoded packet airtime. It allows 1,024 bytes at 8 hops/s,
+160 at 26, 75 at 28, and 36 at 29. The calculated capacity tables are in
+`MODULATION_RESULTS.md`. Payload sizes include application headers/trailers;
+framing and protection are additional. Oversized datagrams and templates are
+rejected, with no truncation or fragmentation/reassembly.
+
+The `peer-{a,b}-x310-auto-hopping.yaml` nodes start at 8 hops/s. Open those nodes in
+the GUI for the measured settings, then adjust the hop rate and inspect effective
+payload size. Save and restart both peers after changes. Existing saved projects
+keep their guard/lead values, so their calculated capacity can differ from this
+example. Existing manual presets remain unchanged.
+
+
+### Dedicated X310 hop-table envelope
+
+The deployment X310 has two UBX-160 v2 boards (serials 325AEBD and 325AF46),
+confirmed with UHD on 2026-10-22. With explicit `hardware.device.type: x300`,
+hopping configuration validation requires hop centers within 10 MHz–6 GHz and:
+
+```text
+max(frequencies_hz) - min(frequencies_hz) + waveform.bandwidth_hz <= 160000000
+```
+
+The configured waveform bandwidth reserves space around the extreme hop centers;
+it is not a measurement of occupied spectrum. This deployment-specific rule is
+checked offline by the GUI and the normal configuration loader, including after
+waveform edits. It does not describe every possible X300-series daughterboard.
+
+X310 hopping now selects fixed-LO/DSP tuning automatically. At channel startup,
+each RX and TX LO is set once to the midpoint of the lowest and highest hop
+frequencies. Subsequent hops use `TuneRequestPolicy.none` for RF and `auto` for
+DSP; UHD calculates the offset for each direction. The backend verifies the
+X310/UBX-160 identity and rejects unreachable centers, changed LOs, and offsets
+outside the reserved analog window. It never silently falls back to RF retuning.
+A new radio session reinitializes the LOs. Fixed-frequency operation and other
+device selections retain ordinary automatic tuning.
+
+GUI hardware checks exercise the same fixed-LO path across every hop and report
+RF/DSP readbacks. Runtime hardware settings include `tuning_mode`, requested and
+actual LO frequencies, DSP offsets, and per-direction RF/DSP request counts.
+See [UHD tuning policies](https://files.ettus.com/manual/structuhd_1_1tune__request__t.html).
+
+The analog envelope check is not a qualification of RF performance across the
+full 160 MHz. The current packet qualification uses 914/915/916 MHz; other tables
+still need hardware checks and packet tests. DSP hops now keep RX streaming. A hardware-time fence after tuning includes
+1 ms for digital settling; old samples are trimmed precisely, preserving valid
+samples in a block that crosses the fence. Missing timestamps fail explicitly.
+Decoder generation checks discard input acquired across a retune without holding
+the decoder lock during an input wait. Clock resets and shutdown still stop and
+drain reception. The supported automatic-sizing cap is 29 hops/s.
+
+### Adding a modulation to hopping
+
+Hopping uses the shared scheduler, fixed-LO/DSP tuner and simple-frame codec; it
+has no separate modulation-specific scheduler. Register a modem in
+`packet_radio.modems.registry.WAVEFORMS`, supply its waveform settings/preset,
+and expose any new parameters in the configuration schema and form catalog.
+The modulation selector and hopping benchmark derive their choices from the registry.
+The modem must implement the `Modem` contract, use the supplied `BurstProcessing`
+envelope/protection (including `decode_body` to restore length bytes), report
+exact `sample_count`, and reset acquisition on a hop. Future modulations still
+need framing, streaming/reset, capacity and hardware qualification tests; registry
+membership alone does not establish a safe hop rate. The 29 hops/s product cap
+is a ceiling, not a qualification claim for every waveform and host.

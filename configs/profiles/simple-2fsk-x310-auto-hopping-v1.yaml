@@ -1,0 +1,55 @@
+profile_version: 1
+id: simple-2fsk-x310-auto-hopping-v1
+revision: 1
+reference: docs/CONFIGURATION.md Automatic payload sizing
+qualification: unqualified
+limitations:
+- Automatic payload sizing uses a measured-path timing allowance, not a hardware maximum.
+- Reduced guards require explicit UHD type x300; measurements apply to the shared
+  X310/UBX same-host setup.
+- Other hosts, boards, hop tables and loads need separate testing. See MODULATION_RESULTS.md.
+- Oversized input is rejected; no automatic fragmentation or truncation.
+waveform:
+  modulation: 2fsk
+  sample_rate_hz: 2000000
+  bandwidth_hz: 1000000
+  bit_rate_bps: 250000
+  frequency_deviation_hz: 125000
+frequency:
+  mode: hopping
+  frequencies_hz:
+  - 914000000
+  - 915000000
+  - 916000000
+  dwell_seconds: 0.125
+  guard_seconds: 0.001
+  epoch: 0
+  synchronization: external-utc
+  sequence_mode: cycle
+  repeated_frequencies: reject
+packet:
+  format: simple-frame-v1
+  max_payload_bytes: 1024
+  frame:
+    preamble: '55'
+    preamble_repetitions: 32
+    sync: a7c35a9e
+    bit_order: big
+    length_bytes: 2
+    length_byte_order: big
+    fixed_payload_bytes: null
+    crc: crc16-ccitt-false
+    crc_byte_order: big
+    whitening: none
+    differential: false
+  payload_sizing: automatic
+protection:
+  scheme: none
+  interleaver_depth: 16
+  bit_repetitions: 1
+  rs_parity_bytes: 0
+link:
+  mode: ack-free
+  minimum_gap_seconds: 0.002
+  minimum_interval_seconds: 0.0
+  turnaround_seconds: 0.002

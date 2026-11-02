@@ -1,7 +1,7 @@
 profile_version: 1
 id: simple-2fsk-x310-hopping-v1
 revision: 1
-reference: docs/X310_IMPROVEMENT_PLAN.md Step 7
+reference: docs/CONFIGURATION.md#version-11-frequency-hopping
 qualification: qualified
 limitations:
 - Project-defined profile; no commercial-radio interoperability claim.
@@ -9,7 +9,7 @@ limitations:
 - 'Qualified only on same-host shared X310/UBX, channels 0/1, 914/915/916 MHz cycle at 2
   hops/s, 100 ms guards and 10 ms timed TX lead.'
 - Two-host operation, other daughterboards and B205 use are unqualified.
-- See MODULATION_RESULTS.md for the repeated short conducted workload; no maximum-rate or RF-mask claim.
+- See docs/UHD_SETUP.md for the conducted check; no maximum-rate or RF-mask claim.
 waveform:
   modulation: 2fsk
   sample_rate_hz: 2000000

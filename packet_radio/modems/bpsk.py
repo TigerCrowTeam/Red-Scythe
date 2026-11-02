@@ -314,11 +314,13 @@ class BPSKModem(StreamingModem):
                                 )
                             )
                         continue
-                    length = self.envelope.body_size(
-                        np.packbits(
-                            candidate_bits[length_start : length_start + self.length_bits]
-                        ).tobytes(),
-                    )
+                    length_field = np.packbits(
+                        candidate_bits[length_start : length_start + self.length_bits]
+                    ).tobytes()
+                    try:
+                        length = self.envelope.body_size(length_field)
+                    except ValueError:
+                        continue
                     if length > self.protection.encoded_size(self.max_frame):
                         continue
                     end = length_start + self.length_bits + length * 8
@@ -343,8 +345,8 @@ class BPSKModem(StreamingModem):
                         candidate_bits[length_start + self.length_bits : end]
                     ).tobytes()
                     try:
-                        result = self.protection.decode(encoded)
-                    except (UncorrectableFECError, ReedSolomonError):
+                        result = self.processing.decode_body(length_field, encoded)
+                    except (ValueError, UncorrectableFECError, ReedSolomonError):
                         continue
                     frame_start = (
                         timing

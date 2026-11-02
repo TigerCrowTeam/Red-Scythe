@@ -21,10 +21,11 @@ from packet_radio.config import (
     SDRConfig,
     StatusConfig,
 )
+from packet_radio.modems.registry import WAVEFORMS
 from packet_radio.protocol.simple import FrameSettings
 from packet_radio.protocol.simple_link import SimpleLinkSettings
 
-MODULATIONS = ("bpsk", "2fsk", "msk", "gmsk", "qpsk")
+MODULATIONS = tuple(WAVEFORMS)
 FORMATS = ("generic-v5", "simple-frame-v1")
 
 
@@ -32,7 +33,7 @@ def compatible_formats(modulation: str) -> tuple[str, ...]:
     """Return currently implemented formats, not proposed future capabilities."""
     if modulation not in MODULATIONS:
         raise ValueError(f"unsupported modulation: {modulation}")
-    return FORMATS if modulation == "2fsk" else ("generic-v5",)
+    return FORMATS
 
 
 @dataclass(frozen=True)
@@ -383,8 +384,14 @@ def _build_catalog() -> tuple[FieldSpec, ...]:
             else "Only the existing UTC/no-duplicates contract is supported"
             if fixed
             else "",
-            help="Ordered frequencies and UTC schedule; validated by normalize_frequency.",
-            constraint_hint="Hopping: 2..256 unique frequencies; dwell >=0.5 s, guard >=0.1 s; 2*guard < dwell; device limits also apply",
+            help=(
+                "X310/UBX-160: hop centers must be 10 MHz–6 GHz. Highest minus lowest "
+                "frequency plus configured signal bandwidth must fit within 160 MHz. "
+                "For a 1 MHz signal, the maximum hop span is 159 MHz."
+                if name == "frequencies_hz"
+                else "Ordered frequencies and UTC schedule; validated by normalize_frequency."
+            ),
+            constraint_hint="Hopping: 2..256 unique frequencies; manual dwell >=0.5 s / guard >=0.1 s; automatic X300 guard >=0.001 s and calculated airtime limit",
         )
 
     add(
@@ -399,7 +406,24 @@ def _build_catalog() -> tuple[FieldSpec, ...]:
         "Framing",
         editor="integer",
         unit="bytes",
-        constraint_hint="1..1024; must fit the selected length field",
+        constraint_hint="1..1024; upper ceiling in automatic mode; must fit the length field",
+    )
+    add(
+        "profile.packet.payload_sizing",
+        "Framing",
+        editor="select",
+        choices=("manual", "automatic"),
+        requires=("hopping", "variable_length"),
+        help="Automatic sizes the payload to the hop airtime budget. Use tested rate/guard/TX-lead settings for this modulation. Oversized input is rejected, never truncated.",
+    )
+    add(
+        "derived.effective_payload_bytes",
+        "Framing",
+        editor="integer",
+        unit="bytes",
+        access="read_only",
+        reason="Calculated from airtime and the configured payload ceiling",
+        help="Actual maximum accepted payload. Both peers must agree.",
     )
     for name in (
         "preamble",
@@ -661,6 +685,8 @@ def available_choices(key: str, selection: Selection) -> tuple:
     field = FIELDS[key]
     if not field.visible(selection, advanced=True):
         return ()
+    if key == "profile.packet.frame.bit_order" and selection.modulation != "2fsk":
+        return ("big",)
     if key == "profile.packet.format":
         return compatible_formats(selection.modulation)
     if key == "profile.frequency.mode":

@@ -7,7 +7,7 @@ For explanations of the editable GUI fields, use the separate
 
 ## Current scope
 
-Release **1.1.0** supports both reliable generic-v5 and ACK-free simple-frame 2FSK.
+Release **1.1.0** supports both reliable generic-v5 and ACK-free simple frames on all five modulations.
 Use the [1.1 migration and profile table](CONFIGURATION.md#upgrading-from-100-to-110)
 for node examples, operating modes, rates and the qualified hopping schedule.
 The generic link behavior below applies only when generic-v5 is selected.
@@ -18,10 +18,9 @@ it does not change the meaning or priority of application data.
 
 The generic core, direct UHD backend and shared configuration interfaces are
 implemented. The shared-channel X310 is the reference for the documented conducted
-matrix. The final B205 comparison preserves its PSK delivery/recovery and QPSK RX
-overflow failures; older passing runs do not supersede those results. Independent-host
-testing remains deferred. See the hardware-specific
-[modulation results](../MODULATION_RESULTS.md) and [UHD setup](UHD_SETUP.md).
+setup. B205 operation needs workload-specific validation, and independent-host
+testing remains deferred. See the calculated [hop/payload tables](../MODULATION_RESULTS.md)
+and [UHD setup](UHD_SETUP.md).
 
 ## Configuration
 
@@ -44,7 +43,7 @@ retain their separate responsibilities.
 
 See [configuration schema and migration](CONFIGURATION.md) for exact names, rate
 semantics, airtime admission and examples. Old unversioned YAML is rejected.
-Profiles are applied at startup. Configured hopping is supported for simple 2FSK;
+Profiles are applied at startup. Configured hopping is supported for simple frames on all five modulations;
 changing a running configuration requires stopping and restarting both matching peers.
 
 ## Authentication setup
@@ -176,8 +175,8 @@ on receive. The generic chain is Hamming/interleaving followed by optional RS.
 The packet codec supplies CRC/signature handling before this chain. Burst framing
 supplies training, sync, length-field interpretation and size; waveform constructors
 receive those components before building acquisition tables. The current interfaces
-operate on byte-aligned data. Step 3 adds configurable frame components and the
-reference 2FSK sample pipeline through `protocol/simple.py`. Step 4 connects it to
+operate on byte-aligned data. `protocol/simple.py` supplies configurable frame
+components and the reference 2FSK sample pipeline. The live profile connects it to
 `RadioApp(processing=SimpleProfile(...))` through `protocol/simple_link.py`; whitening, differential
 encoding and non-byte fields remain unsupported until required by a target.
 
@@ -273,7 +272,7 @@ The UHD adapter flushes a small zero-valued idle interval for this profile so th
 final CRC bits survive TX pipeline drain. The modem retains bounded idle history
 around maximum-size bursts. See the [live API](CONFIGURATION.md#version-11-live-simple-link-modes)
 for construction, limits and the repeatable `tools/simple_link_check.py` bench check.
-Step 5 makes the same selection available through schema-2 YAML and retains its
+Schema-2 YAML makes the same selection available and retains its
 complete configuration in capture format 3. Existing capture formats 1/2 remain readable.
 
 
@@ -295,3 +294,24 @@ rechecks complete-burst admission after modulation and drops crossing simple
 frames without retry. Fixed-frequency scheduling and wire formats are unchanged.
 Configuration limits and the external-UTC synchronization contract are documented
 in `CONFIGURATION.md`; `tools/hopping_check.py` exercises the conducted paths.
+
+
+Automatic payload sizing can prioritize hop speed over packet capacity in the
+variable-length 2FSK hopping mode. The radio calculates how many payload bytes fit
+within each dwell, up to the user's ceiling, and displays that effective limit.
+It accounts for framing/protection and timing reserves; it does not truncate or
+fragment messages. Both peers must use matching settings. See the terminal GUI
+guide for the Payload sizing, Hop rate and Guard seconds controls, and the final
+modulation results for measured hardware performance.
+
+
+For X310/UBX-160 hopping, `hardware/tuning.py` sets each RX/TX analog LO once
+per channel session at the hop table midpoint, then uses DSP-only requests.
+Runtime and hardware preflight share this implementation. The backend verifies
+center-frequency and LO readbacks. DSP hops retain continuous RX and trim old IQ
+using a hardware-time fence, while the decoder resets at each hop. Input waits do
+not hold the decoder lock; generation checks exclude blocks acquired across a
+retune. Other hardware and fixed-frequency operation use ordinary automatic tuning.
+The current supported cap is 29 hops/s. See MODULATION_RESULTS.md for the calculated
+payload tradeoff; the cap is an application limit, not the X310's absolute
+hardware tuning limit.

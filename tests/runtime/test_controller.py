@@ -38,6 +38,7 @@ def project(tmp_path, mode="2fsk"):
     form = FormSession.new()
     if mode != "2fsk":
         form.change("profile.waveform.modulation", mode)
+        form.change("profile.packet.format", "generic-v5")
     return save_project(form.draft, tmp_path / "node.yaml")
 
 

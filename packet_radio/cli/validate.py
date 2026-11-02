@@ -91,7 +91,8 @@ def main() -> None:
                 f"  {config.sdr.modulation}: {frequency_text}, "
                 f"bit_rate={config.sdr.bit_rate_bps:g} bps, "
                 f"symbol_rate={config.sdr.symbol_rate_baud:g} baud, "
-                f"samples/symbol={config.sdr.samples_per_symbol}, max_burst={airtime_ms:.3f} ms"
+                f"samples/symbol={config.sdr.samples_per_symbol}, "
+                f"max_payload={config.endpoint.max_payload_bytes} bytes, max_burst={airtime_ms:.3f} ms"
             )
             if config.sdr.frequency_deviation_hz is not None:
                 print(f"  frequency deviation: +/-{config.sdr.frequency_deviation_hz:g} Hz")

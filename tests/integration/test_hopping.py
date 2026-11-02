@@ -332,7 +332,7 @@ def test_hardware_hop_check_rejects_invalid_arguments_before_open(rate, address,
 
 @pytest.mark.parametrize(
     "rate,address",
-    [(float("nan"), "x"), (float("inf"), "x"), (0, "x"), (4.1, "x"), (3, None)],
+    [(float("nan"), "x"), (float("inf"), "x"), (0, "x"), (8.1, "x"), (3, None)],
 )
 def test_experimental_hop_check_rejects_invalid_arguments_before_open(monkeypatch, rate, address):
     from tools import hopping_check
@@ -342,3 +342,118 @@ def test_experimental_hop_check_rejects_invalid_arguments_before_open(monkeypatc
     with pytest.raises(ValueError, match="experimental rate"):
         hopping_check.run(6, ["a", "b"], shared_address=address, experimental_rate=rate)
     opened.assert_not_called()
+
+
+@pytest.mark.parametrize("guard", [float("nan"), float("inf"), 0, 0.024, 0.101])
+def test_experimental_guard_rejects_invalid_values_before_hardware(monkeypatch, guard):
+    from tools import hopping_check
+
+    opened = Mock(side_effect=AssertionError("must not open hardware"))
+    monkeypatch.setattr(hopping_check, "SharedRadios", opened)
+    with pytest.raises(ValueError, match="experimental guard"):
+        hopping_check.run(
+            6, ["a", "b"], shared_address="x", experimental_rate=7, experimental_guard=guard
+        )
+    opened.assert_not_called()
+
+
+def test_experimental_guard_requires_explicit_experiment():
+    from tools.hopping_check import run
+
+    with pytest.raises(ValueError, match="requires --experimental-rate"):
+        run(6, ["a", "b"], shared_address="x", experimental_guard=0.03)
+
+
+@pytest.mark.parametrize("rate,guard", [(5, 0.05), (6, 0.04), (7, 0.03), (7, 0.025)])
+def test_experimental_seven_hop_timing_keeps_maximum_and_recovery_packets_inside_guard(rate, guard):
+    from tools.hopping_check import experiment_timing
+
+    dwell, recovery_phase = experiment_timing(rate, guard, "x")
+    schedule = FrequencyScheduler(
+        replace(config().frequency, interval_seconds=dwell, guard_seconds=guard)
+    )
+    assert schedule.burst_fits(0.045080, guard + 0.001)
+    assert schedule.burst_fits(0.012664, recovery_phase)
+    assert not schedule.burst_fits(0.045080, dwell - guard - 0.02)
+    # Normal profile validation remains conservative despite benchmark support.
+    definition = deepcopy(config().emulation)
+    definition["frequency"].update(dwell_seconds=dwell, guard_seconds=guard)
+    with pytest.raises(ValueError, match="host hopping requires"):
+        normalize_definition(definition)
+
+
+@pytest.mark.parametrize("rate,guard", [(7, 0.1), (8, 0.04)])
+def test_experimental_probe_rejects_impossible_timing(rate, guard):
+    from tools.hopping_check import experiment_timing
+
+    with pytest.raises(ValueError, match="cannot fit"):
+        experiment_timing(rate, guard, "x")
+
+
+@pytest.mark.parametrize("modulation", ["bpsk", "msk", "gmsk", "qpsk"])
+def test_hopping_benchmark_selects_actual_modem_before_hardware(monkeypatch, modulation):
+    from tools import hopping_check
+
+    def unexpected_open(*args, **kwargs):
+        assert all(c.sdr.modulation == modulation for c in args[0])
+        from packet_radio.modems.registry import WAVEFORMS
+        from packet_radio.protocol.registry import resolve_processing
+
+        for c in args[0]:
+            actual = resolve_processing(c).make_modem(c.sdr)
+            assert type(actual) is type(WAVEFORMS[modulation].build(c.sdr, actual.processing))
+        raise RuntimeError("validated modem selected")
+
+    monkeypatch.setattr(hopping_check, "SharedRadios", unexpected_open)
+    with pytest.raises(RuntimeError, match="validated modem selected"):
+        hopping_check.run(
+            6,
+            ["a", "b"],
+            shared_address="192.168.10.2",
+            automatic_rate=8,
+            automatic_guard=0.001,
+            automatic_lead=0.008,
+            modulation=modulation,
+        )
+
+
+@pytest.mark.parametrize("ceiling", [True, 4, 1025, 100.5])
+def test_hopping_benchmark_rejects_invalid_payload_ceiling(monkeypatch, ceiling):
+    from tools import hopping_check
+
+    opened = Mock(side_effect=AssertionError("must not open hardware"))
+    monkeypatch.setattr(hopping_check, "SharedRadios", opened)
+    with pytest.raises(ValueError, match="payload ceiling"):
+        hopping_check.run(6, ["a", "b"], automatic_rate=14, payload_ceiling=ceiling)
+    opened.assert_not_called()
+
+
+def test_hopping_benchmark_payload_ceiling_requires_automatic_rate():
+    from tools.hopping_check import run
+
+    with pytest.raises(ValueError, match="payload ceiling"):
+        run(6, ["a", "b"], payload_ceiling=100)
+
+
+@pytest.mark.parametrize("rate,expected", [(14, 100), (27, 100), (28, 75)])
+def test_hopping_benchmark_payload_ceiling_preserves_airtime_limit(monkeypatch, rate, expected):
+    from tools import hopping_check
+
+    def inspect(configs):
+        for cfg in configs:
+            assert cfg.endpoint.max_payload_bytes == expected
+            assert cfg.sdr.modulation == "qpsk"
+        raise RuntimeError("configuration inspected")
+
+    monkeypatch.setattr(hopping_check, "SharedRadios", inspect)
+    with pytest.raises(RuntimeError, match="configuration inspected"):
+        hopping_check.run(
+            6,
+            ["a", "b"],
+            shared_address="192.168.10.2",
+            automatic_rate=rate,
+            automatic_guard=0.001,
+            automatic_lead=0.008,
+            modulation="qpsk",
+            payload_ceiling=100,
+        )

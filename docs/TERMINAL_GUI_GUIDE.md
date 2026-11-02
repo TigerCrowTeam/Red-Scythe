@@ -19,6 +19,11 @@ Use the **section selector** to jump to a group. Check **Advanced** (or press F2
 to show additional settings. A field appears only when it applies to your selected
 modulation, packet format and transmit/receive mode.
 
+Parameters you cannot currently change appear as a compact name/value list at the
+end of their section, without descriptions. This includes selectors with only one
+available choice. When your selections make a parameter editable again, its input
+control and description return automatically.
+
 Press Enter to apply a typed value, or F5 to check all pending edits. Save and
 restart the radio to use changed radio settings. Changes to the waveform, packet
 format or hopping schedule usually need matching changes on the other radio.
@@ -68,22 +73,49 @@ saving or starting.
 
 ## Frequency
 
+For this X310's UBX-160 boards, hop centers must be between **10 MHz and 6 GHz**.
+The hop table must also satisfy **highest frequency − lowest frequency + configured
+signal bandwidth ≤ 160 MHz**. A 1 MHz signal therefore permits at most a 159 MHz
+hop span. Invalid tables block saving and starting; reducing the hop rate does not
+relax this bandwidth limit. This rule applies with device type `x300`.
+
+On the X310/UBX-160, hopping automatically holds each RX/TX analog LO at the
+midpoint of the table and changes only the digital frequency offset between
+hops. There is no extra field to configure. Apply hardware checks to the complete
+table before a run. The current maximum is 29 hops/s. Reception continues through DSP hops; hardware
+timestamps exclude samples from the old frequency.
+
+
 | Field | Allowed inputs | What it changes |
 |---|---|---|
-| **Hop rate** | Number greater than 0; at most 2 hops/s for x300, otherwise 1 hop/s. Timing may lower the limit. | Number of frequency changes per second; edits the reciprocal dwell time. Example: 2 means a 500 ms dwell. Maximum 2 hops/s for an explicitly selected x300 device; other supported device selections are limited to 1 hop/s. Airtime and guards can require slower hopping. |
-| **Mode** | `fixed`; simple-frame 2FSK also allows `hopping`. | `fixed` holds one frequency. `hopping` follows a timed table and is currently restricted to simple-frame 2FSK. Changing mode installs the corresponding supported frequency defaults; review the resulting table/schedule. |
+| **Hop rate** | Positive hops/s. Manual sizing: up to 2 for x300, otherwise 1. Automatic sizing: up to 29 for x300, or the displayed timing-based limit if lower (other devices still at most 1). | Frequency changes per second; 7 gives about 143 ms per frequency. Automatic mode reduces payload capacity as you increase the rate. Its upper bound is a timing estimate, not a guarantee of hardware performance. Both peers need matching settings. |
+| **Mode** | `fixed`; simple-frame mode also allows `hopping`. | `fixed` holds one frequency. `hopping` follows a timed table and is currently restricted to simple-frame mode. Changing mode installs the corresponding supported frequency defaults; review the resulting table/schedule. |
 | **Center frequency hz** | Positive Hz/kHz/MHz value within the SDR’s tuning range; e.g. `915 MHz`. | Requested RF center frequency in fixed mode, such as `915 MHz`. Positive, within the selected daughterboard's range. This is independent of the USRP's Ethernet address and the local UDP ports. |
 | **Frequencies hz** | 2–256 unique positive frequencies, in the desired order; each within the SDR’s tuning range. | Ordered hop table, 2–256 unique positive frequencies. Add/remove/reorder entries, then apply rows or F5. Both peers need the same table/order; each entry must pass device and airtime checks. |
-| **Guard seconds** | At least `100 ms`, but strictly less than half the dwell. | Quiet margin at each end of a hop. At least 100 ms and less than half the dwell. Larger guards leave more settling margin but reduce payload time. The full burst, timed lead and implementation margin must fit between them. |
+| **Guard seconds** | Manual sizing: at least `100 ms`. Automatic sizing with x300: at least `1 ms`. Always less than half the dwell. | Settling and end-of-hop quiet time. Larger guards leave less room for payload. The 1 ms guard applies to the continuous DSP path on the shared X310/UBX setup; other boards and hosts need their own checks. |
 | **Epoch** | Nonnegative numeric UTC timestamp in seconds; e.g. `0`. No formatted date strings. | Shared schedule origin as a nonnegative numeric POSIX/UTC timestamp (seconds since 1970-01-01 UTC), not a local clock string. Both peers must use the same value and synchronized UTC clocks. |
 | **Sequence mode** | `cycle`, `ping_pong`. | `cycle` repeats the table from the beginning; `ping_pong` traverses it forward and backward without repeating the endpoints at each turn. For A/B/C: cycle A-B-C-A; ping-pong A-B-C-B-A. |
+
+With the supplied automatic X310 example (250 kbit/s 2FSK, 2 Msps, 1 ms guards,
+8 ms TX lead, 16-packet TX batches), the effective limits are **1,024 bytes at
+8 hops/s**, **160 bytes at 26**, **75 bytes at 28**, and **36 bytes at 29**.
+Use matching settings on both peers. The calculated rate/payload tables are
+in `MODULATION_RESULTS.md`. A larger guard or TX lead reduces capacity.
+
+For QPSK on the tested shared X310, a 60-second check passed at **26 hops/s**
+with **Max payload bytes = 1024** (effective limit **160 bytes**), automatic payload sizing, 250 kbit/s,
+2 Msps, a 1 ms guard and 8 ms TX lead. Set both peers identically. This trades
+packet capacity for faster hopping; 27 hops/s still failed its longer check.
+The tables in `MODULATION_RESULTS.md` give calculated capacities at each hop rate;
+they do not mean every listed rate/payload combination has passed hardware testing.
 
 ## Framing
 
 | Field | Allowed inputs | What it changes |
 |---|---|---|
-| **Format** | `generic-v5`; 2FSK also allows `simple-frame-v1`. | `generic-v5` provides the fixed reliable protocol, addressing and authentication support. `simple-frame-v1` provides configurable ACK-free framing and currently requires 2FSK. Changing format resets dependent profile sections; it is more than changing a header byte. |
-| **Max payload bytes** | Whole number 1–1024 bytes. | Maximum application packet size, 1–1024 bytes, including Packet Builder application headers and trailers. Outer radio framing/protection is additional. Smaller limits reduce maximum airtime; fixed framing must agree with the fixed size. |
+| **Format** | `generic-v5`, `simple-frame-v1` for all five modulations. | `generic-v5` provides the fixed reliable protocol, addressing and authentication support. `simple-frame-v1` provides configurable ACK-free framing and enables hopping. Changing format resets dependent profile sections; it is more than changing a header byte. |
+| **Max payload bytes** | Whole number 1–1024 bytes. | In manual mode, the accepted application packet limit. In automatic mode, an upper ceiling: the actual limit can be smaller to fit a hop. Application headers/trailers count toward this limit; outer framing/protection is additional. |
+| **Payload sizing** | `manual` or `automatic`; available for variable-length hopping packets. | Automatic recalculates the accepted payload size when hop timing, bit rate, framing, protection or the ceiling changes. Smaller packets remain valid. Oversized inputs are rejected, never truncated or automatically fragmented. The effective byte limit appears in the form and status summary. |
 | **Preamble** | 1–64 hex bytes, e.g. `55`; repeated total must not exceed 256 bytes. | Hex bytes repeated before sync to aid signal acquisition. Enter complete bytes, e.g. `55`. Pattern length is 1–64 bytes and the expanded repeated preamble must be 1–256 bytes. |
 | **Preamble repetitions** | Whole number 1–256. | Number of repeats of the entire preamble pattern, 1–256. `55` repeated 32 times produces 32 bytes; `55 aa` repeated 32 times produces 64. Longer preambles add airtime. |
 | **Sync** | 2–16 hex bytes, e.g. `a7 c3 5a 9e`; acquisition pattern must contain both bit values. | Hex synchronization marker following the preamble, 2–16 bytes. Both peers must agree. The combined preamble/sync must contain both zero and one bits for acquisition. |
@@ -99,7 +131,7 @@ saving or starting.
 
 | Field | Allowed inputs | What it changes |
 |---|---|---|
-| **Fec** | `extended-hamming-8-4`; simple-frame 2FSK also allows `none`. | Forward-error-correction (FEC) selection. generic-v5 requires extended-hamming-8-4; simple frames support that or none. FEC adds redundancy and airtime to recover some errors; both peers must use the same scheme. |
+| **Fec** | `extended-hamming-8-4`; simple-frame mode also allows `none`. | Forward-error-correction (FEC) selection. generic-v5 requires extended-hamming-8-4; simple frames support that or none. FEC adds redundancy and airtime to recover some errors; both peers must use the same scheme. |
 | **Interleaver depth** | Whole number 1–256. | Reorders protected bits to spread burst errors before decoding. Integer 1–256. It changes wire layout and buffering; it must match the receiver. It is not a queue capacity. |
 | **Rs parity bytes** | Whole number 0–254; multiples of 2. | Additional Reed–Solomon parity bytes: even integer 0–254, with zero disabling this outer protection. More parity costs airtime and changes coding/block-size constraints; the full configuration validator checks the combination. |
 | **Bit repetitions** | Whole number 1 or greater. | Generic BPSK repetition count, integer at least 1. One means no extra repetition. Higher counts add redundancy and airtime; this control is not supported for the other modulation/format combinations. |
@@ -221,7 +253,7 @@ radios with matching settings.
 | Field value | The number, text or bytes you want to send. Numeric fields accept decimal or a hexadecimal number beginning with `0x`. Hex byte fields use pairs such as `01 ff`, without `0x`. Automatic fields calculate their own values. |
 | Payload encoding | Choose UTF-8 text for readable text, or hexadecimal for exact bytes. Changing the selection changes how the content is interpreted; it does not convert existing text automatically. |
 | Payload content | The data to place in the payload field. At most 4096 typed characters, and the resulting packet must fit the radio's byte limit. Some text characters use more than one byte. |
-| Preamble | Hex pattern sent before the packet's sync marker. See Framing above for limits. Available for simple-frame 2FSK. |
+| Preamble | Hex pattern sent before the packet's sync marker. See Framing above for limits. Available for simple-frame mode. |
 | Preamble repetitions | How many times to repeat that pattern. More repeats add airtime. |
 | Sync | Shared hex marker used to locate the packet. Both radios must match. |
 | Bit order | Order of bits within each transmitted byte. Different from byte order in a multi-byte number. |
@@ -255,7 +287,7 @@ For **Field kind**, choose:
 You can arrange up to 64 fields with the arrow controls. All their bytes together,
 including the payload, must fit the selected radio's limit of at most 1024 bytes.
 Application fields work with every supported modulation. Editable radio framing
-is available only with simple-frame 2FSK.
+is available only with simple-frame mode.
 
 ## Peer setup fields
 
@@ -288,3 +320,11 @@ Open **Export peer** with F6 to create the settings for the other radio.
 | Allow unauthenticated operation on an isolated bench | Checkbox shown when starting generic-v5 without signing keys. Checking it allows that run without verifying sender identities. |
 | Open packet-template path | The saved packet template you want to load into the Packet Builder. |
 | Save packet-template path | Where to save the packet layout and content. This is a separate file from the radio configuration. |
+
+For hopping on BPSK, MSK, GMSK or QPSK, select `simple-frame-v1`, then `hopping`.
+Changing modulation retains the hop schedule and automatic sizing; it selects
+an appropriate preamble and resets waveform/protection presets. Check both peers
+and the effective payload limit after changing settings. Non-2FSK modes use
+`big` bit order; length and CRC byte order can still be selected independently.
+See `MODULATION_RESULTS.md` for measured rates rather than treating the GUI's
+upper bound as a guarantee for every modulation.

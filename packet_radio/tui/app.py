@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +18,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import Button, Checkbox, Footer, Header, Input, Select, Static
 
-from packet_radio.configuration.catalog import FIELDS, visible_fields
+from packet_radio.configuration.catalog import FIELDS, available_choices, visible_fields
 from packet_radio.configuration.draft import RadioDraft
 from packet_radio.configuration.forms import FormSession, format_value, lookup, parse_value
 from packet_radio.configuration.preflight import (
@@ -81,6 +82,10 @@ class RadioEditor(App):
     #form { padding: 0 1; }
     .section-title { text-style: bold; color: $accent; margin-top: 1; height: 2; }
     .field-row { height: auto; margin-bottom: 1; }
+    .compact-field { margin-bottom: 0; }
+    .compact-value-row { height: auto; }
+    .compact-label { width: 45%; height: auto; color: $text-muted; }
+    .compact-value { width: 1fr; height: auto; }
     .field-label { text-style: bold; height: auto; }
     .field-help { color: $text-muted; height: auto; }
     .field-error { color: $error; height: auto; }
@@ -166,6 +171,15 @@ class RadioEditor(App):
                 self.table_buffers[table.key] = table.read_rows()
         self.replacing_project = False
         fields = visible_fields(self.session.selection, advanced=self.advanced)
+        # Re-evaluate on every selection change; never mutate the field catalog.
+        fields = tuple(
+            replace(field, access="read_only")
+            if field.access == "editable"
+            and field.editor == "select"
+            and len(available_choices(field.key, self.session.selection)) == 1
+            else field
+            for field in fields
+        )
         keys = {f.key for f in fields}
         applicable = {f.key for f in visible_fields(self.session.selection, advanced=True)}
         self.pending = {k: v for k, v in self.pending.items() if k in applicable}
@@ -187,7 +201,11 @@ class RadioEditor(App):
                     classes="section-title",
                 )
             )
-            for field in (f for f in fields if f.section == section):
+            section_fields = sorted(
+                (f for f in fields if f.section == section),
+                key=lambda f: f.access != "editable",
+            )
+            for field in section_fields:
                 hints = [] if field.help.startswith("Configure ") else [field.help]
                 if field.access == "editable":
                     bounds = (
@@ -388,7 +406,7 @@ class RadioEditor(App):
                 "profile.waveform.frequency_deviation_hz",
                 "derived.hop_rate",
             }:
-                limits = self.session.draft.limits(row.field.key)
+                limits = self.session.draft.limits(row.field.key, report=report)
                 parts = []
                 for value, inclusive, symbol in (
                     (limits.minimum, limits.minimum_inclusive, ">"),
@@ -409,9 +427,9 @@ class RadioEditor(App):
                 row.query_one("#help-" + field_id(row.field.key), Static).update(
                     row.hint + " · " + hint
                 )
-            row.query_one("#error-" + field_id(row.field.key), Static).update(
-                "Error: " + issues[row.field.key] if row.field.key in issues else ""
-            )
+            error = row.query_one("#error-" + field_id(row.field.key), Static)
+            error.update("Error: " + issues[row.field.key] if row.field.key in issues else "")
+            error.display = row.field.key in issues
             if row.field.access != "editable" and (
                 row.field.key.startswith("derived.") or row.field.key == "profile.qualification"
             ):
@@ -436,7 +454,10 @@ class RadioEditor(App):
             and not self.table_buffers
             and not any(table.dirty for table in self.main_screen.query(Entries))
         ):
-            text += f" · Maximum packet {report.derived.maximum_airtime_seconds * 1000:.3f} ms"
+            text += (
+                f" · Maximum payload {report.derived.effective_payload_bytes} bytes"
+                f" · Maximum packet {report.derived.maximum_airtime_seconds * 1000:.3f} ms"
+            )
         self.main_screen.query_one("#summary", Static).update(text)
         self.main_screen.query_one("#error-link", Button).display = bool(messages)
         self.sub_title = "Unsaved edits" if self.session.unsaved or self.pending else "Offline"

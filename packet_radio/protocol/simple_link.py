@@ -1,6 +1,6 @@
 """Run ACK-free simple frames with explicit direction, input and timing policies.
 
-SimpleProfile connects the configurable 2FSK frame codec to RadioApp. SimpleLink
+SimpleProfile connects the configurable frame codec to RadioApp. SimpleLink
 owns a bounded FIFO with no retry state; SimpleBehavior delivers opaque payloads
 without generic-v5 control traffic, identities or authentication. Preframed input
 is validated before admission and retains its exact length/payload/CRC bytes.
@@ -295,12 +295,16 @@ class SimpleProfile(ProcessingProfile):
         return {"format": self.name, "frame": frame, "link": asdict(self.link)}
 
     def validate(self, config: RadioConfig) -> None:
-        if config.sdr.bit_repetitions != 1 or config.sdr.rrc_rolloff:
-            raise ValueError("simple profile requires unrepeated rectangular 2FSK")
-        if config.sdr.gaussian_bt is not None or config.sdr.gaussian_span_symbols is not None:
-            raise ValueError("Gaussian settings are unsupported for simple 2FSK")
-        if config.sdr.modulation != "2fsk":
-            raise ValueError("simple profile supports only 2FSK")
+        if config.sdr.rrc_rolloff and config.sdr.modulation not in ("bpsk", "qpsk"):
+            raise ValueError("RRC shaping is supported only for BPSK/QPSK")
+        if config.sdr.modulation != "gmsk" and (
+            config.sdr.gaussian_bt is not None or config.sdr.gaussian_span_symbols is not None
+        ):
+            raise ValueError("Gaussian settings are supported only for GMSK")
+        if config.sdr.bit_repetitions != 1:
+            raise ValueError("simple profile requires bit_repetitions=1")
+        if config.sdr.modulation != "2fsk" and self.frame.bit_order != "big":
+            raise ValueError("little bit order is currently supported only for 2FSK")
         hopping = (
             config.schema_version == 2
             and config.emulation is not None
@@ -339,6 +343,24 @@ class SimpleProfile(ProcessingProfile):
         return self.make_modem(config).processing
 
     def make_modem(self, config: SDRConfig, *, clock=time.monotonic):
+        if config.modulation != "2fsk":
+            from packet_radio.modems.registry import make_modem
+            from packet_radio.protocol.simple import FrameProtection, SimpleEnvelope
+
+            protection = FrameProtection(self.frame)
+            modem = make_modem(
+                config,
+                processing=BurstProcessing(protection, SimpleEnvelope(self.frame, protection)),
+                candidate_validator=self.codec.candidate_valid,
+            )
+            modem.max_frame = self.codec.payload_size(
+                self.frame.fixed_payload_bytes or self.frame.max_payload_bytes
+            )
+            from packet_radio.modems.fsk import FSK2Modem
+
+            if isinstance(modem, FSK2Modem):
+                modem.discard_invalid_candidates = True
+            return modem
         return make_frame_modem(
             self.frame,
             sample_rate=config.sample_rate,

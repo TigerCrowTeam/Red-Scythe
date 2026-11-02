@@ -9,7 +9,7 @@ limitations:
 - Host stop/tune/restart only; maximum configured rate 1 hop/s; two-host operation
   unqualified.
 - Qualified only for the documented same-host 914/915/916 MHz cycle at 1 hop/s,
-  100 ms guards, 10 ms timed TX lead and background decoding; see MODULATION_RESULTS.md.
+  100 ms guards, 10 ms timed TX lead and background decoding; see docs/CONFIGURATION.md#version-11-frequency-hopping.
 waveform:
   modulation: 2fsk
   sample_rate_hz: 2000000

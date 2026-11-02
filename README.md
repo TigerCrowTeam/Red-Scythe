@@ -5,16 +5,13 @@ Applications submit and receive packets through local UDP sockets. BPSK, 2FSK,
 MSK and GMSK are the release-focus modulations; QPSK is retained and tested.
 
 The reference setup is one X310 with two UBX-160 channels on one workstation,
-connected through crossed, attenuated cables. Two B205mini radios were also
-measured; the final comparison records their PSK delivery/recovery and QPSK RX
-overflow limitations. Independent-computer qualification remains deferred.
-Configurable settings are not performance guarantees: see the hardware-specific
-[final measurements](MODULATION_RESULTS.md) and [supported settings](docs/CONFIGURATION.md).
+connected through crossed, attenuated cables. B205mini radios remain supported,
+but independent-computer qualification remains deferred. Configurable settings
+are not performance guarantees: see the [calculated hop/payload tables](MODULATION_RESULTS.md)
+and [supported settings](docs/CONFIGURATION.md).
 
-**Version 1.1.0** adds configurable radio emulation. The
-[version 1.1 roadmap](docs/RADIO_V1_1_ROADMAP.md) records the milestones
-and acceptance gates for the documented reference scope: the [initial 2FSK emulation contract](docs/EMULATION_PROFILE.md)
-is defined, processing layers are separated, and the
+**Version 1.1.0** supports configurable radio emulation. The
+[2FSK reference contract](docs/EMULATION_PROFILE.md) defines the baseline wire format, and the
 [configurable framing API](docs/CONFIGURATION.md#version-11-configurable-framing-api)
 is implemented. The [live Python API](docs/CONFIGURATION.md#version-11-live-simple-link-modes)
 adds transmit-only, receive-only and bidirectional simple-frame operation without
@@ -23,14 +20,16 @@ now select either format without source changes and retain resolved settings in
 capture/replay. Start from the paired [node examples](configs/v1_1/peer-a-simple.yaml)
 and [reusable definition](configs/profiles/simple-2fsk-v1.yaml). Schema 1 and legacy
 captures remain supported. The [hopping profile](configs/profiles/simple-2fsk-hopping-v1.yaml)
-adds a deterministic UTC schedule to simple 2FSK. The separate
+adds a deterministic UTC schedule to simple frames. All five current modulations
+can use simple-frame hopping and automatic payload sizing. See
+[payload tables](MODULATION_RESULTS.md) for calculated per-hop capacity, not proof of delivery. The separate
 [X310 hopping profile](configs/profiles/simple-2fsk-x310-hopping-v1.yaml) selects
 2 hops/s on the qualified shared X310/UBX setup; the original remains at 1 hop/s. See the
 [configuration and timing limits](docs/CONFIGURATION.md#version-11-frequency-hopping).
-[Step 7 reference rates](docs/CONFIGURATION.md#step-7-reference-rates) add tested
+[Reference rates](docs/CONFIGURATION.md#reference-rates) add tested
 100/500 kbit/s simple 2FSK profiles alongside 250 kbit/s. Non-integral resampling,
 wider clock tracking and target-specific shaping remain explicitly deferred.
-[Step 8 fidelity checks](docs/CONFIGURATION.md#step-8-fidelity-acceptance) verify
+[Fidelity checks](docs/CONFIGURATION.md#fidelity-acceptance) verify
 independent packet/IQ references, digital spectrum and receiver recovery. Calibrated
 RF measurements and actual-target interoperability remain unqualified.
 
@@ -38,17 +37,15 @@ The distribution and commands are named **`packet-radio`**; Python imports use
 **`packet_radio`**. See [migration](docs/CONFIGURATION.md#upgrading-to-packet-radio-100)
 when updating an older `telemetry-radio` installation.
 
-- [Usage and architecture guide](docs/PROGRAM_GUIDE.md)
 - [Current packet protocol](docs/PROTOCOL.md)
 - [Program guide](docs/PROGRAM_GUIDE.md) — what the radio does, its architecture, data flow and runtime behavior.
 - [Terminal GUI guide](docs/TERMINAL_GUI_GUIDE.md) — editable fields, choices, units and limits for radio setup and packet building.
-- [Terminal configuration interface](docs/TERMINAL_UI_PLAN.md) — modulation-specific forms, saved projects and radio start/stop/status.
 
 ## Repository layout
 
 ```text
 README.md                 Getting started
-MODULATION_RESULTS.md     Final modulation summaries
+MODULATION_RESULTS.md     Per-modulation hop/payload/packet-size tables
 packet_radio/          Application, transmit/receive processing, modems, protocol and hardware
     cli/                  Command-line entry points
     configuration/        Field catalog, validation, drafts and atomic project storage
@@ -64,7 +61,7 @@ tests/
     protocol/             Packet codec, authentication and reliability tests
     hardware/             Mocked UHD, tuning and hardware-clock tests
     integration/          Application, configuration, endpoints and tooling tests
-docs/                     Configuration, protocol, operating guides and 1.1 roadmap
+docs/                     Configuration, protocol and operating guides
 tools/                    Hardware diagnostics and qualification runners
 fixtures/                 Protocol-v5 reference packets
 ```
@@ -142,7 +139,7 @@ Unknown configuration keys fail rather than being silently ignored.
 
 The terminal editor supports offline drafts, modulation-specific controls,
 validation, saving, peer export and owned radio start/stop. See the
-[terminal interface plan](docs/TERMINAL_UI_PLAN.md). To launch it:
+[terminal GUI guide](docs/TERMINAL_GUI_GUIDE.md). To launch it:
 
 ```bash
 python -m pip install -e '.[ui,test]'
@@ -154,6 +151,12 @@ python -m pytest -q tests/configuration tests/tui tests/runtime
 Use Tab/Shift+Tab to navigate, Enter to apply text, F5 to validate, F2 for Advanced,
 F8 to focus an error, Ctrl+O to open, Ctrl+N for a new draft and Ctrl+Q to quit. Selecting a modulation
 applies its preset waveform settings and shows only applicable controls.
+For variable-length 2FSK hopping, **Payload sizing → automatic** calculates the
+accepted byte limit from hop timing, bit rate and framing. **Max payload bytes**
+becomes an upper ceiling; the effective limit appears in the form and summary.
+The `configs/v1_1/peer-a-x310-auto-hopping.yaml` example starts at 8 hops/s with
+1 ms guards, 8 ms timed TX lead and 16-packet TX batches. Higher rates trade payload capacity for speed; the displayed upper
+bound is capped at 29 hops/s and may be lower when timing requires it. Oversized input is rejected.
 Use Ctrl+S to save, F4 for Save As, F6 to export a complementary peer and F7 to
 import a legacy schema-1 configuration into a new schema-2 draft. Editing and
 saving work offline. Hardware access happens only through explicit checks:
@@ -203,8 +206,8 @@ status must be enabled in the saved node settings for live readings. Missing or
 inapplicable fields appear as N/A. Ctrl+T and Ctrl+C also stop from the details
 dialog. No network control endpoint is added.
 
-The terminal interface passed the [conducted X310 acceptance matrix](MODULATION_RESULTS.md#terminal-interface-x310-qualification-2026-10-20)
-for all five generic modulations, custom simple 2FSK and phase-coordinated hopping.
+The terminal interface supports all five modulations, configurable simple frames
+and phase-coordinated hopping on the shared X310.
 Hopping retains its whole-burst boundary-drop policy; F12 shows admission drops
 and hop timing diagnostics. Arbitrary packet-arrival phases can still lose bursts.
 
@@ -303,5 +306,3 @@ matrix targets 3.10–3.14, while the measured UHD host uses Python 3.14.4.
 
 For two endpoints on one X310, use `--config` and `--peer-config` in a single
 process; see [the shared-device setup](docs/UHD_SETUP.md#two-endpoints-on-one-x310).
-
-Planned performance work is tracked in the [X310 improvement plan](docs/X310_IMPROVEMENT_PLAN.md).

@@ -13,7 +13,7 @@ import hashlib
 import json
 import math
 import re
-from dataclasses import asdict, fields
+from dataclasses import asdict, fields, replace
 from pathlib import Path
 
 import yaml
@@ -30,6 +30,7 @@ from packet_radio.config import (
     StatusConfig,
     _section,
 )
+from packet_radio.hop_budget import MIN_AUTO_GUARD_SECONDS
 from packet_radio.modems.registry import samples_per_symbol
 from packet_radio.protocol.simple import FrameSettings
 from packet_radio.protocol.simple_link import SimpleLinkSettings, SimpleProfile
@@ -140,11 +141,11 @@ HOPPING_FREQUENCY_FIELDS = {
     "sequence_mode",
     "repeated_frequencies",
 }
-PACKET_FIELDS = {"format", "max_payload_bytes", "frame"}
+PACKET_FIELDS = {"format", "max_payload_bytes", "frame", "payload_sizing"}
 
 
-def normalize_frequency(raw) -> dict:
-    """Freeze the external-UTC hopping contract; reject unmeasured fast settings."""
+def normalize_frequency(raw, *, automatic_payload=False) -> dict:
+    """Normalize UTC hopping; automatic capacity is checked after host settings resolve."""
     if not isinstance(raw, dict):
         raise ValueError("frequency must be a mapping")
     if raw.get("mode") == "fixed":
@@ -162,7 +163,12 @@ def normalize_frequency(raw) -> dict:
                 raise ValueError(f"{key} must be finite")
         if result["epoch"] < 0:
             raise ValueError("hop epoch must be a nonnegative POSIX timestamp")
-        if result["dwell_seconds"] < 0.5 or result["guard_seconds"] < 0.1:
+        if automatic_payload:
+            if result["dwell_seconds"] <= 0 or result["guard_seconds"] < MIN_AUTO_GUARD_SECONDS:
+                raise ValueError(
+                    f"automatic hopping requires positive dwell and guard >= {MIN_AUTO_GUARD_SECONDS:g} s"
+                )
+        elif result["dwell_seconds"] < 0.5 or result["guard_seconds"] < 0.1:
             raise ValueError("host hopping requires dwell >= 0.5 s and guard >= 0.1 s")
         if 2 * result["guard_seconds"] >= result["dwell_seconds"]:
             raise ValueError("hop guards must leave a usable dwell")
@@ -229,7 +235,12 @@ def normalize_definition(raw) -> dict:
     modem = _section(ModemProfile, wf)
     wf = {k: v for k, v in asdict(modem).items() if k in MODEM_FIELDS}
     wf.update(sample_rate_hz=rate, bandwidth_hz=bandwidth)
-    freq = normalize_frequency(raw["frequency"])
+    if not isinstance(raw.get("packet"), dict):
+        raise ValueError("packet must be a mapping")
+    sizing = raw["packet"].get("payload_sizing", "manual")
+    if sizing not in ("manual", "automatic"):
+        raise ValueError("payload_sizing must be manual or automatic")
+    freq = normalize_frequency(raw["frequency"], automatic_payload=sizing == "automatic")
     packet = mapping(
         raw["packet"],
         PACKET_FIELDS,
@@ -237,6 +248,15 @@ def normalize_definition(raw) -> dict:
         "packet",
     )
     maximum = packet["max_payload_bytes"]
+    if sizing == "automatic" and (
+        freq["mode"] != "hopping"
+        or packet["format"] != "simple-frame-v1"
+        or not isinstance(packet.get("frame", {}), dict)
+        or packet.get("frame", {}).get("fixed_payload_bytes") is not None
+    ):
+        raise ValueError(
+            "automatic payload sizing requires hopping and variable-length simple frames"
+        )
     if type(maximum) is not int or not 1 <= maximum <= 1024:
         raise ValueError("max_payload_bytes must be an integer in 1..1024")
     protection = mapping(raw["protection"], PROTECTION_FIELDS, {"scheme"}, "protection")
@@ -318,6 +338,9 @@ def normalize_definition(raw) -> dict:
 
 def merge_overrides(base: dict, overrides: dict) -> dict:
     result = copy.deepcopy(base)
+    if isinstance(overrides, dict) and isinstance(overrides.get("packet"), dict):
+        if "payload_sizing" in overrides["packet"]:
+            result["packet"].setdefault("payload_sizing", "manual")
 
     def merge(target, changes):
         mapping(changes, target, label="overrides")
@@ -331,7 +354,7 @@ def merge_overrides(base: dict, overrides: dict) -> dict:
 
     mapping(overrides, SECTIONS, label="overrides")
     for key, value in overrides.items():
-        mapping(value, base[key], label=f"overrides.{key}")
+        mapping(value, result[key], label=f"overrides.{key}")
     if "format" in overrides.get("packet", {}) or "mode" in overrides.get("link", {}):
         raise ValueError("select another profile to change packet format or link mode")
     merge(result, overrides)
@@ -396,9 +419,14 @@ def validate_resolved(config: RadioConfig) -> None:
     d = normalize_definition(config.emulation)
     if d != config.emulation:
         raise ValueError("resolved profile must contain all normalized fields")
+    from packet_radio.hop_budget import automatic, payload_limit
+
+    expected_payload = (
+        payload_limit(config) if automatic(config) else d["packet"]["max_payload_bytes"]
+    )
     if (
         d["packet"]["format"] != config.packet_format
-        or d["packet"]["max_payload_bytes"] != config.endpoint.max_payload_bytes
+        or expected_payload != config.endpoint.max_payload_bytes
     ):
         raise ValueError("resolved packet settings disagree")
     if config.frequency != frequency_config(d["frequency"]):
@@ -483,7 +511,7 @@ def load_v2(raw: dict, path: Path, *, definition: dict | None = None) -> RadioCo
     recording = _section(
         RecordingConfig, {**asdict(recording), "directory": local(recording.directory)}
     )
-    return _section(
+    config = _section(
         RadioConfig,
         dict(
             node_id=raw["node_id"],
@@ -504,6 +532,13 @@ def load_v2(raw: dict, path: Path, *, definition: dict | None = None) -> RadioCo
             input_kind=raw.get("input_kind", "payload"),
         ),
     )
+    from packet_radio.hop_budget import automatic, payload_limit
+
+    if automatic(config):
+        config = replace(
+            config, endpoint=replace(config.endpoint, max_payload_bytes=payload_limit(config))
+        )
+    return config
 
 
 def profile_fingerprint(definition: dict) -> str:

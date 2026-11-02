@@ -13,6 +13,7 @@ import sys
 from typing import Any
 
 from packet_radio.configuration.preflight import RESULT_PREFIX, resolve, validate_shared_pair
+from packet_radio.hardware.tuning import FrequencyTuner
 from packet_radio.hardware.uhd import load_uhd, make_uhd_device, validate_device_capabilities
 
 
@@ -90,19 +91,13 @@ def probe(api, configs) -> dict:
                 if antenna is not None:
                     getattr(device, f"set_{direction}_antenna")(antenna, channel)
             # Probe each hop, not merely the first, without creating any streams.
+            tuner = FrequencyTuner(api, device, sdr, config.frequency.frequencies_hz)
             tuned = []
             for frequency in config.frequency.frequencies_hz:
                 entry = {"requested_hz": frequency}
                 for direction in ("rx", "tx"):
-                    getattr(device, f"set_{direction}_freq")(
-                        api.types.TuneRequest(frequency), channel
-                    )
-                    value = float(getattr(device, f"get_{direction}_freq")(channel))
-                    entry[direction + "_hz"] = value
-                    if not math.isclose(value, frequency, rel_tol=0, abs_tol=1):
-                        raise ValueError(
-                            f"UHD {direction} frequency coerced: {frequency} -> {value}"
-                        )
+                    entry[direction + "_hz"] = tuner.tune(direction, frequency)
+                entry.update(tuner.settings)
                 tuned.append(entry)
             nodes.append(
                 {

@@ -146,19 +146,40 @@ def test_noise_buffer_remains_bounded_and_invalid_rates_fail():
             make_frame_modem(**kwargs)
 
 
-@pytest.mark.parametrize("modulation", ["bpsk", "qpsk", "msk", "gmsk"])
-def test_simple_envelope_cannot_silently_enter_an_unsupported_waveform(modulation):
-    from packet_radio.config import load_config
-    from packet_radio.modems.burst import BurstProcessing
-    from packet_radio.modems.registry import make_modem
-    from packet_radio.protocol.simple import FrameProtection, SimpleEnvelope
+@pytest.mark.parametrize("modulation", ["bpsk", "qpsk", "msk", "gmsk", "2fsk"])
+@pytest.mark.parametrize("size", [1, 64, 1024])
+@pytest.mark.parametrize("variant", ["default", "fixed", "fec", "little_length"])
+def test_simple_frame_registry_roundtrip(modulation, size, variant):
+    from pathlib import Path
 
-    cfg = FrameSettings()
-    protection = FrameProtection(cfg)
-    processing = BurstProcessing(protection, SimpleEnvelope(cfg, protection))
-    radio = load_config(f"configs/examples/peer-a-{modulation}.yaml").sdr
-    with pytest.raises(ValueError, match="unsupported"):
-        make_modem(radio, processing=processing)
+    from packet_radio.configuration.forms import preset
+    from packet_radio.profiles import load_v2, read_yaml
+    from packet_radio.protocol.registry import resolve_processing
+
+    path = Path("configs/v1_1/peer-a-x310-simple.yaml")
+    definition = preset(modulation)
+    frame = definition["packet"]["frame"]
+    if variant == "fixed":
+        frame.update(fixed_payload_bytes=size, length_bytes=0)
+        definition["packet"]["max_payload_bytes"] = size
+    elif variant == "fec":
+        definition["protection"].update(scheme="extended-hamming-8-4", rs_parity_bytes=16)
+    elif variant == "little_length":
+        frame.update(length_byte_order="little", crc="crc32-iso-hdlc", crc_byte_order="little")
+    cfg = load_v2(read_yaml(path), path, definition=definition)
+    processing = resolve_processing(cfg)
+    processing.validate(cfg)
+    tx, rx = processing.make_modem(cfg.sdr), processing.make_modem(cfg.sdr)
+    payload = (bytes(range(251)) * 5)[:size]
+    wire = processing.codec.encode(payload)
+    samples = tx.modulate(wire)
+    assert len(samples) == tx.sample_count(len(wire))
+    decoded = rx.feed(
+        np.concatenate(
+            (np.zeros(256, dtype=np.complex64), samples, np.zeros(1024, dtype=np.complex64))
+        )
+    )
+    assert [processing.codec.decode(frame) for frame in decoded] == [payload]
 
 
 def test_maximum_frame_survives_low_power_stream_idle_history_and_block_rounding():
@@ -276,3 +297,94 @@ def test_live_search_rejects_noise_and_corrupt_frame_then_recovers():
         frames.extend(rx.feed(stream[start : start + 4096]))
         assert len(rx._samples) <= 2 * rx.sample_count(rx.max_frame)
     assert frames == [good]
+
+
+@pytest.mark.parametrize("modulation", ["bpsk", "qpsk", "msk", "gmsk", "2fsk"])
+def test_simple_registry_stream_reset_and_crc_rejection(modulation):
+    from pathlib import Path
+
+    from packet_radio.configuration.forms import preset
+    from packet_radio.profiles import load_v2, read_yaml
+    from packet_radio.protocol.registry import resolve_processing
+
+    path = Path("configs/v1_1/peer-a-x310-simple.yaml")
+    cfg = load_v2(read_yaml(path), path, definition=preset(modulation))
+    processing = resolve_processing(cfg)
+    tx, rx = processing.make_modem(cfg.sdr), processing.make_modem(cfg.sdr)
+    payload = bytes(range(64))
+    wire = processing.codec.encode(payload)
+    samples = tx.modulate(wire)
+    # A hop reset must discard the old partial frame.
+    assert not list(rx.feed(samples[: len(samples) // 2]))
+    rx.reset()
+    decoded = []
+    stream = np.concatenate(
+        (np.zeros(256, dtype=np.complex64), samples, np.zeros(2048, dtype=np.complex64))
+    )
+    for start in range(0, len(stream), 1024):
+        decoded.extend(rx.feed(stream[start : start + 1024]))
+    assert [processing.codec.decode(frame) for frame in decoded] == [payload]
+    # Corrupt the on-air body, bypassing the TX codec's deliberate CRC check.
+    bad = bytearray(wire)
+    bad[-1] ^= 1
+    protection = tx.processing.protection
+    original = protection.encode
+    protection.encode = lambda frame: bytes(bad)
+    try:
+        broken = tx.modulate(wire)
+    finally:
+        protection.encode = original
+    rx.reset()
+    candidates = rx.feed(np.concatenate((broken, np.zeros(2048, dtype=np.complex64))))
+    assert not any(processing.codec.candidate_valid(frame) for frame in candidates)
+
+
+@pytest.mark.parametrize("modulation", ["bpsk", "qpsk"])
+def test_simple_psk_rrc_uses_exact_airtime(modulation):
+    from pathlib import Path
+
+    from packet_radio.configuration.forms import preset
+    from packet_radio.profiles import load_v2, read_yaml
+    from packet_radio.protocol.registry import resolve_processing
+
+    definition = preset(modulation)
+    definition["waveform"].update(rrc_rolloff=0.35, rrc_span_symbols=8)
+    path = Path("configs/v1_1/peer-a-x310-simple.yaml")
+    cfg = load_v2(read_yaml(path), path, definition=definition)
+    processing = resolve_processing(cfg)
+    tx, rx = processing.make_modem(cfg.sdr), processing.make_modem(cfg.sdr)
+    payload = bytes(range(64))
+    wire = processing.codec.encode(payload)
+    samples = tx.modulate(wire)
+    assert len(samples) == tx.sample_count(len(wire))
+    decoded = rx.feed(
+        np.concatenate(
+            (np.zeros(256, dtype=np.complex64), samples, np.zeros(2048, dtype=np.complex64))
+        )
+    )
+    assert [processing.codec.decode(frame) for frame in decoded] == [payload]
+
+
+@pytest.mark.parametrize("modulation", ["bpsk", "qpsk", "msk", "gmsk", "2fsk"])
+@pytest.mark.parametrize("size", [1, 64, 1024])
+@pytest.mark.parametrize("offset", [0, 123, 2048, 4095])
+def test_simple_registry_low_power_block_alignment(modulation, size, offset):
+    from pathlib import Path
+
+    from packet_radio.configuration.forms import preset
+    from packet_radio.profiles import load_v2, read_yaml
+    from packet_radio.protocol.registry import resolve_processing
+
+    path = Path("configs/v1_1/peer-a-x310-simple.yaml")
+    cfg = load_v2(read_yaml(path), path, definition=preset(modulation))
+    processing = resolve_processing(cfg)
+    tx, rx = processing.make_modem(cfg.sdr), processing.make_modem(cfg.sdr)
+    payload = (bytes(range(251)) * 5)[:size]
+    samples = tx.modulate(processing.codec.encode(payload)) * 0.01
+    rng = np.random.default_rng(1101)
+    start = 3 * 4096 + offset
+    length = start + len(samples) + 4 * 4096
+    stream = (rng.normal(0, 1e-5, length) + 1j * rng.normal(0, 1e-5, length)).astype(np.complex64)
+    stream[start : start + len(samples)] += samples
+    frames = collect(rx, stream, chunk=4096)
+    assert [processing.codec.decode(frame) for frame in frames] == [payload]

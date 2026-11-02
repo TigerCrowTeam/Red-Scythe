@@ -90,6 +90,7 @@ def test_reordering_generic_new_and_unsaved_guard():
             await pilot.press("escape")
             await b.action_close()
             await app.apply_choice("profile.waveform.modulation", "qpsk")
+            await app.apply_choice("profile.packet.format", "generic-v5")
             await app.action_packet_builder()
             await pilot.pause()
             await b.new_template()

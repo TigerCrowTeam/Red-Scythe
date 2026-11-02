@@ -22,6 +22,7 @@ import numpy as np
 
 from packet_radio.config import SDRConfig
 from packet_radio.diagnostics import TimingDiagnostics
+from packet_radio.hardware.tuning import FrequencyTuner
 
 LOG = logging.getLogger(__name__)
 
@@ -211,6 +212,7 @@ class UHDRadio:
         self.rx_stream: Any = None
         self.tx_stream: Any = None
         self.rx_active = False
+        self._receive_after_ns: int | None = None
         self._control_lock = session.lock if session is not None else threading.RLock()
         self._counters = dict.fromkeys(self.COUNTERS, 0)
         self.actual_settings: dict[str, Any] = {"tx_idle_samples": tx_idle_samples}
@@ -267,6 +269,8 @@ class UHDRadio:
                 self.actual_settings[f"{direction}_rate"] = actual
                 if not math.isclose(actual, config.sample_rate, rel_tol=1e-6):
                     raise ValueError(f"UHD {direction} sample rate coerced: {actual}")
+            self.tuner = FrequencyTuner(self.api, self.device, config, frequencies_hz)
+            self.actual_settings.update(self.tuner.settings)
             if frequencies_hz:
                 self.tune(frequencies_hz[0])
             stream_args = self.api.usrp.StreamArgs("fc32", "sc16")
@@ -305,30 +309,34 @@ class UHDRadio:
             # Stop old-epoch samples before resetting the clock.
             self._stop_receive()
             self.device.set_time_now(self._time_spec(time_ns))
+            self._receive_after_ns = None
             self._start_receive()
 
     def tune(self, frequency_hz: float) -> None:
         with self.timing.lock("uhd_control", self._control_lock):
+            self.tuner.check_frequency(frequency_hz)
             validate_device_capabilities(self.device, self.config, (frequency_hz,))
             was_active = self.rx_active
-            if was_active:
+            continuous = was_active and self.tuner.lo_hz is not None
+            if was_active and not continuous:
                 self._stop_receive()
             try:
                 for direction in ("rx", "tx"):
-                    getattr(self.device, f"set_{direction}_freq")(
-                        self.api.types.TuneRequest(frequency_hz), self.config.channel
-                    )
-                    actual = float(
-                        getattr(self.device, f"get_{direction}_freq")(self.config.channel)
-                    )
-                    self.actual_settings[f"{direction}_frequency"] = actual
-                    if not math.isclose(actual, frequency_hz, rel_tol=0, abs_tol=1):
-                        raise ValueError(
-                            f"UHD {direction} frequency coerced: {frequency_hz} -> {actual}"
-                        )
+                    self.tuner.tune(direction, frequency_hz)
+                if continuous:
+                    # Keep the stream running, but never feed queued pre-hop IQ to
+                    # the new decoder. Trim samples through the timestamp fence,
+                    # including a 1 ms digital filter settling allowance.
+                    self._receive_after_ns = self.hardware_time() + 1_000_000
+                self.actual_settings.update(self.tuner.settings)
+                self.actual_settings["continuous_dsp_hopping"] = self.tuner.lo_hz is not None
                 LOG.info("tuned to %.3f MHz", frequency_hz / 1e6)
+            except BaseException:
+                if continuous:
+                    self._stop_receive()
+                raise
             finally:
-                if was_active:
+                if was_active and not continuous:
                     self._start_receive()
 
     def transmit(self, samples: np.ndarray) -> None:
@@ -551,6 +559,18 @@ class UHDRadio:
             self._counters["rx_stream_errors"] += 1
             raise OSError(f"UHD RX invalid sample count: {received}")
         timestamp = int(metadata.time_spec.to_ticks(1e9)) if metadata.has_time_spec else None
+        if self._receive_after_ns is not None:
+            if timestamp is None:
+                self._counters["rx_stream_errors"] += 1
+                raise OSError("Continuous DSP hopping requires timestamped RX samples")
+            if timestamp < self._receive_after_ns:
+                discard = math.ceil(
+                    (self._receive_after_ns - timestamp) * self.config.sample_rate / 1e9
+                )
+                if discard >= received:
+                    return SampleBlock(buffer[0, :0])
+                timestamp += round(discard * 1e9 / self.config.sample_rate)
+                return SampleBlock(buffer[0, discard:received], timestamp)
         return SampleBlock(buffer[0, :received], timestamp)
 
     def receive_diagnostics(self) -> dict[str, int]:

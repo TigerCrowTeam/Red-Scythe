@@ -48,7 +48,11 @@ def receive_radio(app: RadioApp) -> bool:
                 app.statistics.increment(name, value - previous)
             app._receive_diagnostics[name] = int(value)
         batches = []
-        first = app.decoder_worker.receive(timeout=0.002)
+        timeout = 0.002
+        if len(app.config.frequency.frequencies_hz) > 1:
+            # Do not sleep through the next hop boundary waiting for decoded data.
+            timeout = min(timeout, max(0.0, app.scheduler.state().seconds_to_change - 0.0005))
+        first = app.decoder_worker.receive(timeout=timeout)
         if first is not None:
             batches.append(first)
             for _ in range(63):

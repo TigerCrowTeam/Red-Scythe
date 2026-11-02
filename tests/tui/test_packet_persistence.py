@@ -63,6 +63,7 @@ def test_open_failure_preserves_current_packet(tmp_path, bad_file):
     elif bad_file == "wrong-format":
         form = FormSession.new()
         form.change("profile.waveform.modulation", "qpsk")
+        form.change("profile.packet.format", "generic-v5")
         save_template(PacketTemplate.new(form.report.config), path)
 
     async def exercise():

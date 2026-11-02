@@ -77,7 +77,7 @@ def test_frame_crc_fec_and_frequency_transitions():
     form.change("profile.frequency.mode", "fixed")
     assert form.report.valid, form.report.issues
     form.change("profile.waveform.modulation", "qpsk")
-    assert form.selection.packet_format == "generic-v5"
+    assert form.selection.packet_format == "simple-frame-v1"
     assert form.report.valid
 
 
@@ -89,6 +89,7 @@ def test_pulse_shape_and_timing_switches_clear_invalid_hidden_fields():
     assert not form.report.valid
     form.change("derived.pulse_shaping", "rectangular")
     assert form.report.valid
+    form.change("profile.packet.format", "generic-v5")
     form.change("profile.link.tdd_period_seconds", 2)
     form.change("profile.link.tdd_guard_seconds", 2)
     assert not form.report.valid
@@ -106,3 +107,17 @@ def test_operation_and_device_switches():
     form.change("node.hardware.device.type", "x300")
     assert "serial" not in form.draft.node["hardware"]["device"]
     assert form.report.valid
+
+
+def test_simple_bit_order_switch_clears_unsupported_choice():
+    from packet_radio.configuration.catalog import available_choices
+
+    form = FormSession.new()
+    form.change("profile.packet.frame.bit_order", "little")
+    assert form.report.valid
+    form.change("profile.waveform.modulation", "msk")
+    assert form.report.valid, form.report.issues
+    assert form.value("profile.packet.frame.bit_order") == "big"
+    assert available_choices("profile.packet.frame.bit_order", form.selection) == ("big",)
+    form.change("profile.waveform.modulation", "2fsk")
+    assert available_choices("profile.packet.frame.bit_order", form.selection) == ("big", "little")

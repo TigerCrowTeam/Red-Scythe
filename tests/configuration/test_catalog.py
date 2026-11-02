@@ -140,12 +140,10 @@ def test_rrc_fields_follow_pulse_shaping_selection(modulation):
 
 @pytest.mark.parametrize("modulation", MODULATIONS)
 def test_format_choices_match_backend_capabilities(modulation):
-    expected = ("generic-v5", "simple-frame-v1") if modulation == "2fsk" else ("generic-v5",)
+    expected = ("generic-v5", "simple-frame-v1")
     assert compatible_formats(modulation) == expected
     assert available_choices("profile.packet.format", Selection(modulation=modulation)) == expected
-    if modulation != "2fsk":
-        with pytest.raises(ValueError, match="incompatible"):
-            Selection(modulation=modulation, packet_format="simple-frame-v1")
+    Selection(modulation=modulation, packet_format="simple-frame-v1")
 
 
 def test_fixed_generic_format_does_not_offer_custom_framing_or_hopping():

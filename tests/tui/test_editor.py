@@ -24,6 +24,51 @@ async def settle(pilot):
     raise AssertionError("form did not finish mounting")
 
 
+def test_auto_payload_controls_recalculate_from_hop_rate():
+    from pathlib import Path
+
+    from packet_radio.configuration.draft import RadioDraft
+    from packet_radio.configuration.forms import FormSession
+
+    async def exercise():
+        path = Path(__file__).resolve().parents[2] / "configs/v1_1/peer-a-x310-hopping.yaml"
+        source = RadioDraft.load(path)
+        source.set("node.runtime.hardware_timed_tx_lead_seconds", 0.008)
+        app = RadioEditor(FormSession(source))
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settle(pilot)
+            control(app, "profile.packet.payload_sizing").value = "automatic"
+            await settle(pilot)
+            for key, value in [
+                ("profile.frequency.guard_seconds", "1 ms"),
+                ("derived.hop_rate", "28"),
+            ]:
+                widget = control(app, key)
+                widget.focus()
+                widget.value = value
+                await pilot.press("enter")
+                await settle(pilot)
+            assert app.session.report.valid, app.session.report.issues
+            assert app.session.report.config.endpoint.max_payload_bytes == 75
+            assert "75" in str(control(app, "derived.effective_payload_bytes").render())
+            assert "75 bytes" in str(app.query_one("#summary").render())
+            rate = control(app, "derived.hop_rate")
+            rate.focus()
+            rate.value = "30"
+            await pilot.press("enter")
+            await settle(pilot)
+            assert not app.session.report.valid
+            assert "must not exceed 29 hops/s" in str(app.session.report.issues)
+            rate.value = "27"
+            await pilot.press("enter")
+            await settle(pilot)
+            assert not app.errors
+            assert app.session.report.config.endpoint.max_payload_bytes == 116
+            assert app.session.value("profile.packet.max_payload_bytes") == 1024
+
+    asyncio.run(exercise())
+
+
 def test_keyboard_unit_edit_validation_error_focus_and_resize():
     async def exercise():
         app = RadioEditor()
@@ -211,5 +256,68 @@ def test_framing_fec_crc_and_rrc_selectors_filter_controls():
             await settle(pilot)
             assert app.query("#" + field_id("profile.waveform.rrc_span_symbols"))
             assert app.session.report.valid
+
+    asyncio.run(exercise())
+
+
+def test_compact_values_restore_controls_when_choices_become_available():
+    from textual.widgets import Select, Static
+
+    from packet_radio.tui.widgets import FieldRow
+
+    async def exercise():
+        app = RadioEditor()
+        async with app.run_test(size=(80, 24)) as pilot:
+            await settle(pilot)
+            control(app, "profile.waveform.modulation").value = "bpsk"
+            await settle(pilot)
+            control(app, "profile.packet.format").value = "generic-v5"
+            await settle(pilot)
+            for key in ("profile.frequency.mode",):
+                assert isinstance(control(app, key), Static)
+                row = app.query_one("#row-" + field_id(key), FieldRow)
+                assert row.has_class("compact-field")
+                assert not row.query(".field-help")
+            await pilot.resize_terminal(48, 16)
+            await settle(pilot)
+            for row in app.query(".compact-field"):
+                assert not row.query(".field-help")
+                assert row.query_one(".compact-label").size.width > 0
+                assert row.query_one(".compact-value").size.width > 0
+            control(app, "profile.waveform.modulation").value = "2fsk"
+            await settle(pilot)
+            assert isinstance(control(app, "profile.packet.format"), Select)
+            control(app, "profile.packet.format").value = "simple-frame-v1"
+            await settle(pilot)
+            for key in ("profile.packet.format", "profile.frequency.mode"):
+                assert isinstance(control(app, key), Select)
+                row = app.query_one("#row-" + field_id(key), FieldRow)
+                assert not row.has_class("compact-field")
+                assert row.query(".field-help")
+            assert app.session.report.valid
+
+    asyncio.run(exercise())
+
+
+def test_x310_hop_span_error_blocks_save_and_recovers():
+    from packet_radio.configuration.forms import FormSession
+    from tests.configuration.test_auto_payload import draft
+
+    async def exercise():
+        app = RadioEditor(FormSession(draft()))
+        async with app.run_test(size=(100, 40)) as pilot:
+            await settle(pilot)
+            key = "profile.frequency.frequencies_hz"
+            table = control(app, key)
+            table.query_one("#cell-0-0", Input).value = "750 MHz"
+            await app.apply_table(table)
+            assert not app.session.report.valid
+            assert "hop span plus signal bandwidth" in str(app.session.report.issues)
+            assert not await app.valid_for_write()
+            assert app.query_one("#start-radio").disabled
+            table.query_one("#cell-0-0", Input).value = "914 MHz"
+            await app.apply_table(table)
+            assert app.session.report.valid
+            assert await app.valid_for_write()
 
     asyncio.run(exercise())

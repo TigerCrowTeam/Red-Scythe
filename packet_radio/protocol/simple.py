@@ -3,7 +3,8 @@
 FrameSettings validates supported framing/protection choices. SimpleFrameCodec
 encodes length, opaque payload and CRC; SimpleEnvelope supplies acquisition bytes
 and maps payload length to protected size. make_frame_modem connects these pieces
-without enabling a new application link mode or changing generic-v5 configuration.
+for the reference 2FSK path; SimpleProfile supplies the same frame processing
+to other registered modems without changing generic-v5 configuration.
 """
 
 from __future__ import annotations
@@ -73,7 +74,7 @@ class FrameSettings:
             raise ValueError("sync must contain 2..16 bytes")
         prefix = self.training + self.sync
         if all(byte == 0 for byte in prefix) or all(byte == 255 for byte in prefix):
-            raise ValueError("2FSK acquisition prefix must contain both bit values")
+            raise ValueError("acquisition prefix must contain both bit values")
         if (
             self.bit_order not in ("big", "little")
             or self.length_byte_order not in ("big", "little")
@@ -230,8 +231,6 @@ class FrameProtection:
 
 @dataclass(frozen=True)
 class SimpleEnvelope:
-    supported_modulations = ("2fsk",)
-
     settings: FrameSettings
     protection: FrameProtection
 

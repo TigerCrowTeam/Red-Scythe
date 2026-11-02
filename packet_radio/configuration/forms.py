@@ -45,7 +45,24 @@ def preset(modulation="2fsk", packet_format="simple-frame-v1") -> dict:
         if packet_format == "simple-frame-v1"
         else f"generic-{modulation}-unslotted-v5"
     )
-    return normalize_definition(read_yaml(template_root() / "profiles" / f"{name}.yaml"))
+    definition = read_yaml(template_root() / "profiles" / f"{name}.yaml")
+    if packet_format == "simple-frame-v1" and modulation != "2fsk":
+        from packet_radio.modems.registry import waveform
+
+        definition["waveform"] = read_yaml(
+            template_root() / "profiles" / f"generic-{modulation}-unslotted-v5.yaml"
+        )["waveform"]
+        definition["id"] = f"simple-{modulation}-v1"
+        definition["qualification"] = "unqualified"
+        definition["reference"] = "docs/CONFIGURATION.md: simple-frame modem contract"
+        definition["limitations"] = [
+            "Project-defined frame; no commercial-radio interoperability claim.",
+            "Calculated payload capacity is not hardware qualification; test the exact settings.",
+        ]
+        definition["waveform"]["bit_rate_bps"] = 250000
+        definition["packet"]["frame"]["preamble"] = waveform(modulation).training.hex()
+        definition["packet"]["frame"]["preamble_repetitions"] = 1
+    return normalize_definition(definition)
 
 
 def lookup(document, path, default=None):
@@ -226,6 +243,8 @@ class FormSession:
         )
 
     def value(self, key):
+        if key == "profile.packet.payload_sizing":
+            return self.draft.profile["packet"].get("payload_sizing", "manual")
         if key == "node.hardware.device.type":
             return self.draft.node["hardware"]["device"].get("type", "auto")
         if key == "node.overrides":
@@ -250,15 +269,15 @@ class FormSession:
         if key in ("profile.waveform.modulation", "profile.packet.format"):
             mode = value if key.endswith("modulation") else before.modulation
             fmt = value if key.endswith("format") else before.packet_format
-            if key.endswith("format") and fmt == "simple-frame-v1" and mode != "2fsk":
-                raise ValueError("Custom frames currently require 2FSK.")
-            if mode != "2fsk":
-                fmt = "generic-v5"
-            if fmt == "simple-frame-v1" and mode != "2fsk":
-                raise ValueError("Custom frames currently require 2FSK.")
             chosen = preset(mode, fmt)
             self.draft.set("profile.waveform", chosen["waveform"])
             self.draft.set("profile.protection", chosen["protection"])
+            if fmt == "simple-frame-v1" and mode != before.modulation:
+                # Use a waveform-appropriate acquisition word; retain packet and hop settings.
+                for field in ("preamble", "preamble_repetitions", "bit_order"):
+                    self.draft.set(
+                        f"profile.packet.frame.{field}", chosen["packet"]["frame"][field]
+                    )
             if fmt != before.packet_format:
                 for section in ("packet", "link", "frequency"):
                     self.draft.set(f"profile.{section}", chosen[section])
@@ -274,6 +293,8 @@ class FormSession:
                 self.draft.set("profile.frequency", chosen["frequency"])
             else:
                 current = self.draft.profile["frequency"]
+                if self.draft.profile["packet"].get("payload_sizing") == "automatic":
+                    self.draft.set("profile.packet.payload_sizing", "manual")
                 self.draft.set(
                     "profile.frequency",
                     {"mode": "fixed", "center_frequency_hz": current["frequencies_hz"][0]},
@@ -282,6 +303,11 @@ class FormSession:
             self.draft.set("profile.waveform.rrc_rolloff", 0.35 if value == "rrc" else 0.0)
             self.draft.set("profile.waveform.rrc_span_symbols", 8)
         elif key == "derived.length_mode":
+            if (
+                value == "fixed"
+                and self.draft.profile["packet"].get("payload_sizing") == "automatic"
+            ):
+                self.draft.set("profile.packet.payload_sizing", "manual")
             self.draft.set("profile.packet.frame.length_bytes", 0 if value == "fixed" else 2)
             self.draft.set(
                 "profile.packet.frame.fixed_payload_bytes",
@@ -340,6 +366,8 @@ class FormSession:
                 # Use canonical defaults for transforms, not the previous preset's values.
                 if name.endswith("bit_repetitions"):
                     default = 1
+                if name.endswith("payload_sizing"):
+                    default = "manual"
                 if name.endswith("rrc_rolloff"):
                     default = 0.0
                 if name.endswith("fixed_payload_bytes"):

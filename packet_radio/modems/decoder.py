@@ -59,6 +59,7 @@ class DecoderWorker:
         self._decode_lock = threading.Lock()
         self._paused = threading.Event()
         self._discard_until = 0.0
+        self._generation = 0
         self._processing_ms: deque[float] = deque(maxlen=2048)
         self._processing_sorted: list[float] = []
         self._blocks = 0
@@ -84,8 +85,13 @@ class DecoderWorker:
                 if self._paused.is_set():
                     time.sleep(0.0005)
                     continue
+                generation = self._generation
+                block = self.radio.receive_timed(timeout_us=5_000)
                 with self._decode_lock:
-                    block = self.radio.receive_timed(timeout_us=5_000)
+                    # A retune may complete while waiting for input. Never feed
+                    # a block obtained under an earlier decoder generation.
+                    if generation != self._generation or self._paused.is_set():
+                        continue
                     samples = block.samples
                     if not len(samples) or time.monotonic() < self._discard_until:
                         continue
@@ -144,6 +150,7 @@ class DecoderWorker:
         try:
             with self._decode_lock:
                 action()
+                self._generation += 1
                 self.modem.reset()
                 self._last_time_ns = None
                 self._last_sample_count = 0

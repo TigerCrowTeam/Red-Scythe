@@ -2,7 +2,7 @@
 
 The hardware backend uses Ettus `uhd.usrp.MultiUSRP` directly. The current conducted
 reference is one X310 with two shared UBX-160 channels on one workstation. B205mini
-endpoints remain supported with the measured limitations in `MODULATION_RESULTS.md`;
+endpoints remain supported but need qualification for their specific workload;
 B205 uses `type=b200`, and X310 uses `type=x300`. The verified host is Ubuntu 26.04.1,
 UHD 4.9.0.1-1ubuntu1 and system Python 3.14.4.
 Other operating systems/UHD builds have not been qualified for this project.
@@ -161,8 +161,7 @@ when requested, its temporary JSON contains report version 1, profile paths/hash
 effective settings, hardware readbacks and UHD version, before/after counters,
 workload conditions and outcomes. Temporary key paths are redacted. Successful
 shutdown is acknowledged only after resources close and processes exit; cleanup
-errors fail the run. Retain final summaries in `MODULATION_RESULTS.md`, then discard
-the temporary report. No results directory is required.
+errors fail the run. Reports are temporary diagnostics; no results directory is required.
 
 A failed delivery, stream, latency or recovery check returns a nonzero exit code.
 Echo and restart checks must run separately. `--interrupt-seconds 17` in a non-echo
@@ -185,8 +184,8 @@ PYTHONPATH=. python tools/uhd_direct_probe.py --serials 3457464 3457480 \
 It bypasses application framing and buffering. Its FFT peak-to-median-bin ratio is
 a diagnostic spectral measurement, not calibrated SNR or power in dBm.
 
-All final measured outcomes, qualification conditions and full reproduction
-commands are maintained in [MODULATION_RESULTS.md](../MODULATION_RESULTS.md).
+The [payload tables](../MODULATION_RESULTS.md) contain calculated hopping capacity,
+not hardware qualification records.
 The local runner uses two processes on one computer; independent-host acceptance
 remains deferred. Do not infer performance at untested rates, gains or frequencies.
 
@@ -245,15 +244,14 @@ snapshot through the end of delivery grace, including the wait for scheduled sta
 Both modes require at least 99% delivery, no unexpected/duplicate payloads, no
 stream or endpoint errors and no retry exhaustion; echo additionally requires
 p95 RTT at most one second. The reports include missing sequences, profile hashes,
-configuration/hardware snapshots and stream deltas. Summarize completed hardware
-results in `MODULATION_RESULTS.md` and discard temporary JSON afterward.
+configuration/hardware snapshots and stream deltas. These are diagnostic outputs;
+`MODULATION_RESULTS.md` is limited to the hop/payload/packet-size tables.
 
 ## Two endpoints on one X310
 
-The measured comparison is in [MODULATION_RESULTS.md](../MODULATION_RESULTS.md#x310-two-channel-comparison--2026-10-14).
-The simple profiles and hopping passed; the legacy reliable-link workloads
-showed timing failures and backlog. The shared X310 reliable-link path remains
-experimental and is not yet an overall performance upgrade over the B205 pair.
+The X310/UBX shared-channel setup is the reference configuration. Hardware
+acceptance applies to the exact waveform, traffic and timing settings tested;
+B205 performance and independent-host operation need their own checks.
 
 Use a single process to own the board, with channel 0 for daughterboard A and
 channel 1 for B. Do not launch two independent processes against the same X310.
@@ -310,33 +308,11 @@ comparison includes those architectural differences as well as the RF hardware.
 
 ### X310 host transport assessment
 
-At the measured two-channel 2 Msps workload, retain the existing 1 Gb Ethernet
-transport and host settings. Step 8 compares application latency, shared-process
-CPU and stream errors before proposing a buffer change; removing a startup
-warning alone is not a performance improvement. The 512 KiB candidate passed
-normal traffic but reported a TX underflow in its third maximum-payload run;
-complete payload delivery did not satisfy the zero-stream-error gate. A baseline
-recheck also reported an underflow, so buffer size is not an established cause or
-fix. Both failures involved roughly 20 ms submission attempts with about 9.4 ms
-initial TX lead. The subsequent burst-timing investigation reproduced starvation
-at Python return boundaries and qualified final-data EOB plus a larger QPSK host
-batch; see the burst-submission follow-up in `MODULATION_RESULTS.md`. This does
-not establish the OS-level cause of every historical delay. Step 9 subsequently
-found repeatable BPSK/QPSK echo latency failures despite clean stream counters.
-The subsequent PSK receive-ordering/lookahead fix passed three echo repeats per
-mode and the affected traffic/recovery checks, closing the documented same-host
-conducted acceptance matrix. The subsequent revised-code B205 comparison found
-PSK and reliable-link recovery failures; retain the X310 as the reference within
-that tested scope. Independent-host interoperability remains unqualified. The
-smaller buffer is not an adopted setting.
-Final transport comparisons are in
-[Step 8 results](../MODULATION_RESULTS.md#x310-step-8-host-transport--2026-10-15);
-[Step 9 results](../MODULATION_RESULTS.md#x310-step-9-qualification-closeout--2026-10-15)
-preserve the initial PSK echo failure, with the resolution in the
-[PSK follow-up](../MODULATION_RESULTS.md#x310-psk-echo-acceptance-follow-up--2026-10-15).
-The [B205 comparison](../MODULATION_RESULTS.md#b205mini-revised-code-comparison--2026-10-15)
-records the same-code hardware follow-up, including failed workloads and startup
-buffer drops; it is not a blanket qualification of the B205 profiles.
+For the two-channel 2 Msps reference workload, retain the existing 1 Gb Ethernet
+transport unless measurements show a constraint. Compare application latency,
+CPU and stream errors before changing socket or UHD buffers; removing a startup
+warning alone does not establish a performance improvement. A smaller transport
+buffer was not adopted. Independent-host interoperability remains unqualified.
 
 The measured host uses `enp132s0`, MTU 1500 and a 1000 Mb/s full-duplex link.
 `net.core.rmem_max` is 50,000,000 bytes and `net.core.wmem_max` is 1,048,576 bytes;
@@ -374,12 +350,9 @@ hardware:
     send_buff_size: '524288'
 ```
 
-Keep every other field unchanged. Historical Step 8 used QPSK's 16-packet TX
-batch; current examples use 256 after the burst-timing follow-up. Hold the batch
-size fixed within a comparison; current code/settings do not reproduce the old
-baseline. If the test copies are outside the configuration directory, resolve
-their `profile` path to
-an absolute path. Both nodes must have identical device arguments. Close the
+Keep every other field unchanged, including TX batch size. The current generic
+X310 QPSK examples use 256 transport packets per call. If test copies are outside
+the configuration directory, resolve their `profile` path to an absolute path. Both nodes must have identical device arguments. Close the
 previous process before reopening with the new setting; delete the test override
 to restore the original behavior. `recv_buff_size` is also a UHD device argument,
 but RX buffer sizing was not changed in this assessment. UHD's
@@ -501,8 +474,7 @@ Observations are aggregated separately for each radio application.
 
 Instrumentation performs additional clock reads and bounded locked updates.
 Compare identical short workloads with diagnostics off and on before using
-these measurements to justify optimizations. Keep final conclusions in
-`MODULATION_RESULTS.md`; temporary benchmark reports are disposable.
+these measurements to justify optimizations. Temporary benchmark reports are disposable.
 
 ### Shared-channel execution and decoder statistics
 
@@ -513,12 +485,10 @@ the arrival-order window, removing one expired value and inserting the new
 value under its existing state lock. Status reads no longer sort that history.
 This preserves duplicate values, rolling-window eviction and current counters;
 there is no cached/stale status interval or additional process/IPC path.
-See the Step 6 comparison in `MODULATION_RESULTS.md` for the CPU benefit and
-its conducted hardware scope.
 
 ### Receive search scheduling
 
-The BPSK, 2FSK, MSK and GMSK receivers can search a live burst before its energy returns
+All five receivers can search a live burst before its energy returns
 to idle. A plausible preamble/length schedules the next search when enough
 samples for that candidate, including the known receive shaping delay, exist.
 Payload validation is unchanged; a length field alone never delivers a packet.
@@ -538,7 +508,7 @@ These receive-only changes do not alter transmitted samples, framing, profile id
 policy. The 4,096-sample RX blocks and 256-block queue are unchanged: measured
 host queue residence did not justify a buffering-size change. Extra correlation
 work is a tradeoff, so assess end-to-end delivery latency and stream errors,
-not decoder-call duration alone. See Step 4 in `MODULATION_RESULTS.md`.
+not decoder-call duration alone.
 
 ### UHD transmit batching
 
@@ -579,10 +549,8 @@ avoiding Python scheduling gaps between their transport fragments. UHD still
 fragments internally. Other node examples and the B205 default stay at one.
 Use this pair for the conducted X310 QPSK setup; selecting QPSK in an older node
 file alone does not enable batching. This is a startup setting, not a live
-stream reconfiguration API. Keep it matched when comparing runs. See the QPSK
-underflow investigation in `MODULATION_RESULTS.md` for repeated workloads and
-limits. Step 2's historical timing failure remains recorded there; a scoped
-QPSK follow-up does not qualify every device, rate or profile for batching.
+stream reconfiguration API. Keep it matched when comparing runs; the conducted
+QPSK setup does not qualify every device, rate or profile for batching.
 
 ```sh
 python tools/uhd_link_check.py --shared-device \
@@ -661,10 +629,8 @@ python tools/uhd_link_check.py --shared-device \
 The paired application launcher also accepts these profiles. It requires the
 configured authentication keys or the existing explicit isolated-bench opt-in;
 the benchmark generates temporary keys itself. The runtime submission default
-remains one transport packet per send. See `MODULATION_RESULTS.md` for exact
-delivery counts, queue expiration, latency and capacity limits.
-The portable profiles retain their `unqualified` labels: the Step 9 and PSK
-follow-up acceptance applies to the documented X310 host configurations and
-conducted workloads. It does not qualify those profiles on every device or
+remains one transport packet per send. The portable profiles retain their
+`unqualified` labels: conducted acceptance applies to the exact X310 host
+configuration and workload. It does not qualify those profiles on every device or
 establish target-radio interoperability. Complete delivery alone does not clear
 an observed UHD underflow.

@@ -417,10 +417,30 @@ def validate_config(config: RadioConfig, *, processing: ProcessingProfile | None
     if not 1 <= sdr.open_retry_attempts <= 60 or not 0 <= sdr.open_retry_seconds <= 30:
         raise ValueError("invalid SDR open retry settings")
     freq = config.frequency
+    if (
+        config.schema_version == 2
+        and len(freq.frequencies_hz) > 1
+        and freq.guard_seconds < 0.1
+        and sdr.device.get("type") != "x300"
+    ):
+        raise ValueError("reduced hopping guards require an explicitly selected X300-series device")
     if not freq.frequencies_hz or any(v <= 0 for v in freq.frequencies_hz):
         raise ValueError("frequencies must be positive")
     if len(set(freq.frequencies_hz)) != len(freq.frequencies_hz):
         raise ValueError("frequency list contains duplicates")
+    if len(freq.frequencies_hz) > 1 and sdr.device.get("type") == "x300":
+        # Deployment constraint: the dedicated X310 has two UBX-160 v2 boards.
+        # Reserve the configured signal bandwidth across the entire hop table.
+        # This is an offline envelope check, not DSP-only tuning qualification.
+        low, high = min(freq.frequencies_hz), max(freq.frequencies_hz)
+        if low < 10e6 or high > 6e9:
+            raise ValueError("X310/UBX-160 hop frequencies must be within 10 MHz to 6 GHz")
+        span = high - low
+        if span + sdr.bandwidth > 160e6:
+            raise ValueError(
+                "X310/UBX-160 hop span plus signal bandwidth must not exceed 160 MHz "
+                f"(span {span / 1e6:g} MHz + signal {sdr.bandwidth / 1e6:g} MHz)"
+            )
     if freq.interval_seconds <= 0 or not 0 <= freq.guard_seconds < freq.interval_seconds / 2:
         raise ValueError("invalid frequency guard interval")
     if (

@@ -1,14 +1,13 @@
 # Simple 2FSK emulation contract
 
-Contract revision: **1**, frozen for version 1.1 Step 1.
+Contract revision: **1**, frozen for version 1.1.
 Profile identifier: **`simple-2fsk-v1`**.
 Packet/burst format identifier: **`simple-frame-v1`**.
 
 Status in release 1.1.0: the codec/sample pipeline, ACK-free live modes, reusable
 schema-2 YAML selection and resolved capture/replay are implemented. Short conducted
 integration and independent fidelity checks pass; sustained fixed-profile RF
-qualification remains pending. See [final results](../MODULATION_RESULTS.md);
-schema-1 configuration still rejects these identifiers. This is a project-defined reference radio, not a commercial
+qualification remains pending. Schema-1 configuration still rejects these identifiers. This is a project-defined reference radio, not a commercial
 radio protocol.
 Its acceptance level is **behavior emulation between our two SDRs**.
 
@@ -202,25 +201,25 @@ implementation under test.
    rather than inferred from UDP send timestamps. Frequency/power calibration and
    a target spectral mask are outside this reference profile's qualification.
 
-Keep final measured outcomes in `MODULATION_RESULTS.md`. Do not mark these gates
-passed until the new profile exists and the checks have actually run.
+These acceptance criteria require actual hardware checks; calculated payload
+capacity is not proof of delivery or interoperability.
 
 ## Capability and target status
 
-| Property | Status at Step 1 | Evidence / limit |
+| Property | Current scope | Evidence / limit |
 |---|---|---|
 | Direct UHD and 2FSK waveform primitive | Implemented | Existing generic-v5 code and conducted measurements |
 | This frame layout | Implemented | `protocol/simple.py`; explicit `SimpleProfile` application selection |
-| ACK-free live link mode | Implemented; short conducted checks passed | Step 4 live modes and Step 5 schema-2/capture-3 selection; sustained qualification pending |
+| ACK-free live link mode | Implemented; short conducted checks passed | Live modes and schema-2/capture-3 selection; sustained qualification pending |
 | Approximation of another radio | None claimed | This is a project-defined reference profile |
 | Named target and specification revision | Unknown / not selected | Record both before target-specific compatibility work |
 | Target packet/timing/whitening/security behavior | Unknown | Do not substitute generic-v5 behavior for missing information |
 | Hopping | Separate schema-2 simple-2fsk-hopping-v1 profile | See CONFIGURATION.md for its timing contract and separate conducted workload |
-| Non-integral sample/bit-rate ratios | Explicitly deferred | Step 7 reference rates are integral; a target requiring resampling must reopen this work |
+| Non-integral sample/bit-rate ratios | Explicitly deferred | Reference rates are integral; a target requiring resampling must reopen this work |
 | Actual-target interoperability | Unverified | Requires independent target equipment/reference and separate tests |
 | Two-computer physical qualification | Deferred | Initial acceptance uses one workstation and two SDRs |
 
 To add a target, record its model/revision, specification or capture provenance,
 exact implemented subset, known approximations, and numerical waveform/timing
 acceptance limits. Keep separate statuses for reference emulation and actual-device
-interoperability. Selecting that target does not block the next architectural step.
+interoperability.

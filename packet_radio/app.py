@@ -23,6 +23,7 @@ from packet_radio.clock_sync import HardwareClockSynchronizer
 from packet_radio.config import RadioConfig, configuration_snapshot, validate_config
 from packet_radio.endpoint import PayloadEndpoint, UDPEndpoint
 from packet_radio.hardware.uhd import BufferedRadio, UHDRadio
+from packet_radio.hop_budget import automatic, transition_allowance
 from packet_radio.modems.decoder import DecoderWorker
 from packet_radio.protocol.authentication import (
     load_private_key,
@@ -319,7 +320,15 @@ class RadioApp:
             if hopping:
                 finished = self.scheduler.state()
                 phase = self.config.frequency.interval_seconds - finished.seconds_to_change
-                if finished.slot != state.slot or phase > self.config.frequency.guard_seconds:
+                # Automatic admission reserves transition + settling before RF.
+                # Complete the tune within the transition allowance so a full
+                # guard remains before the shared earliest transmit time.
+                deadline = (
+                    transition_allowance(self.config)
+                    if automatic(self.config)
+                    else self.config.frequency.guard_seconds
+                )
+                if finished.slot != state.slot or phase > deadline:
                     self.statistics.increment("hop_tune_deadlines_missed")
                 self._prepared_burst = None
             backend = getattr(self.sdr, "radio", self.sdr)

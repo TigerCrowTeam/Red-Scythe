@@ -175,3 +175,44 @@ def test_incremental_processing_window_matches_exact_sort_through_eviction():
             assert worker._processing_sorted == expected
             assert len(worker._processing_sorted) <= 2048
     assert worker.diagnostics()["decoder_processing_max_ms"] == 30
+
+
+def test_retune_does_not_wait_for_input_and_discards_inflight_generation():
+    import threading
+    from unittest.mock import Mock
+
+    entered, release, retuned = threading.Event(), threading.Event(), threading.Event()
+
+    class BlockingRadio(Radio):
+        first = True
+
+        def receive_timed(self, timeout_us=5_000):
+            if self.first:
+                self.first = False
+                entered.set()
+                assert release.wait(2)
+                return SampleBlock(np.ones(4, np.complex64), 1000)
+            return super().receive_timed(timeout_us)
+
+    radio = BlockingRadio([SampleBlock(np.ones(2, np.complex64), 2000)])
+    modem = Modem()
+    modem.reset = Mock()
+    worker = DecoderWorker(radio, modem, sample_rate=1e6)
+
+    def retune():
+        worker.retune(lambda: None, 0)
+        retuned.set()
+
+    thread = threading.Thread(target=retune)
+    try:
+        assert entered.wait(1)
+        thread.start()
+        assert retuned.wait(0.5), "retune must not wait for a blocking receive"
+        release.set()
+        assert wait_for_batch(worker).frames == [(b"\x02", 2000)]
+        assert worker.receive() is None
+        modem.reset.assert_called_once()
+    finally:
+        release.set()
+        thread.join(2)
+        worker.close()

@@ -13,6 +13,7 @@ import time
 from typing import TYPE_CHECKING
 
 from packet_radio.hardware.uhd import TransmitDeadlineError
+from packet_radio.hop_budget import HOST_MARGIN_SECONDS, automatic, transition_allowance
 
 if TYPE_CHECKING:
     from packet_radio.app import RadioApp
@@ -24,8 +25,59 @@ def new_session_id() -> int:
     return ((time.time_ns() // 1_000_000) << 16 | secrets.randbits(16)) & 0xFFFFFFFFFFFFFFFF
 
 
+def hop_transmit_target(app: RadioApp, sample_count: int, slot: int) -> int | None:
+    """Fix a device-time target within conservative host-time bounds for this hop.
+
+    Bracket the clock read, check both ends of its uncertainty interval, then
+    submit an immutable target. Backend preparation may reject a late target,
+    but cannot move it later across the trailing guard.
+    """
+    before = app.wall_clock()
+    device_now = app.sdr.hardware_time()
+    after = app.wall_clock()
+    lead = app.config.link.hardware_timed_tx_lead_seconds
+    earliest, latest = before + lead, after + lead
+    first, last = app.scheduler.state(earliest), app.scheduler.state(latest)
+    airtime = (
+        sample_count + app.processing.tx_idle_samples(app.config.sdr)
+    ) / app.config.sdr.sample_rate + 0.001
+    if automatic(app.config):
+        airtime += HOST_MARGIN_SECONDS
+    if (
+        after < before
+        or first.slot != slot
+        or last.slot != slot
+        or first.frequency_hz != app.current_frequency
+        or not first.transmit_allowed
+        or (
+            automatic(app.config)
+            and app.config.frequency.interval_seconds - first.seconds_to_change
+            < app.config.frequency.guard_seconds + transition_allowance(app.config)
+        )
+        or not app.scheduler.burst_fits(airtime, now=latest)
+    ):
+        LOG.debug(
+            "hop target rejected: before=%f after=%f lead=%f airtime=%f slot=%s first=%s last=%s",
+            before,
+            after,
+            lead,
+            airtime,
+            slot,
+            first,
+            last,
+        )
+        return None
+    return device_now + int(lead * 1e9)
+
+
 def transmit_one(app: RadioApp) -> None:
     state = app.scheduler.state()
+    if len(app.config.frequency.frequencies_hz) > 1 and (
+        state.slot != app._hop_slot or state.frequency_hz != app.current_frequency
+    ):
+        # The boundary can pass while step() waits for received data. Leave
+        # queued packets untouched until the next step retunes this slot.
+        return
     scheduled = app._next_hardware_tdd_opportunity()
     scheduled_channel_allowed = True
     if scheduled is not None:
@@ -44,9 +96,21 @@ def transmit_one(app: RadioApp) -> None:
         else app._tdd_transmit_allowed()
     )
     selection_started = app.statistics.timing.start()
+    # Timed lead may overlap the peer's settling wait; the RF target must not.
+    peer_ready = not automatic(app.config) or (
+        app.config.frequency.interval_seconds - state.seconds_to_change
+        >= app.config.frequency.guard_seconds
+        + transition_allowance(app.config)
+        - (
+            app.config.link.hardware_timed_tx_lead_seconds
+            if app.config.link.hardware_timed_io
+            else 0
+        )
+    )
     queued = app.link.next_packet(
         clear,
         state.transmit_allowed
+        and peer_ready
         and (
             len(app.config.frequency.frequencies_hz) == 1
             or app.monotonic_clock() >= app._hop_ready_at
@@ -97,6 +161,8 @@ def transmit_one(app: RadioApp) -> None:
                 len(samples) + app.processing.tx_idle_samples(app.config.sdr)
             ) / app.config.sdr.sample_rate
             duration += 0.001
+            if automatic(app.config):
+                duration += HOST_MARGIN_SECONDS
             if app.config.link.hardware_timed_io:
                 duration += timed_lead
             fresh = app.scheduler.state()
@@ -106,6 +172,12 @@ def transmit_one(app: RadioApp) -> None:
                 or not app.scheduler.burst_fits(duration)
                 or app.monotonic_clock() < app._hop_ready_at
             ):
+                LOG.debug(
+                    "hop preparation rejected: duration=%f initial=%s fresh=%s",
+                    duration,
+                    state,
+                    fresh,
+                )
                 app.statistics.increment("hop_burst_rejections")
                 app._prepared_burst = None
                 app.behavior.transmit_failed(app, queued)
@@ -115,7 +187,15 @@ def transmit_one(app: RadioApp) -> None:
             return
         submit_started = app.statistics.timing.start()
         if app.config.link.hardware_timed_io:
-            if target_ns is None:
+            if target_ns is None and len(app.config.frequency.frequencies_hz) > 1:
+                target_ns = hop_transmit_target(app, len(samples), state.slot)
+                if target_ns is None:
+                    app.statistics.increment("hop_burst_rejections")
+                    app._prepared_burst = None
+                    app.behavior.transmit_failed(app, queued)
+                    return
+                app.sdr.transmit_at(samples, target_ns)
+            elif target_ns is None:
                 # The backend chooses the target after its own preparation;
                 # IQ ownership and stale-event handling must not consume lead.
                 target_ns = app.sdr.transmit_with_lead(

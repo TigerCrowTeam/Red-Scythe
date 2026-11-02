@@ -254,3 +254,57 @@ def test_rrc_shaped_qpsk_round_trip_with_timing_phase_and_noise():
 
     receiver = QPSKModem(8, rrc_rolloff=0.35, rrc_span_symbols=8)
     assert list(receiver.feed(impaired.astype(np.complex64))) == [payload]
+
+
+def test_qpsk_live_short_packet_decodes_before_maximum_frame_or_idle():
+    """A raised noise tail must not delay a short frame until the next hop."""
+    tx = QPSKModem(16, max_frame=1024, sample_rate=2_000_000)
+    rx = QPSKModem(16, max_frame=1024, sample_rate=2_000_000)
+    block = 4096
+    noise = np.full(block, 1e-5 + 1e-5j, dtype=np.complex64)
+    for _ in range(3):
+        assert list(rx.feed(noise)) == []
+    payload = b"small packet"
+    samples = tx.modulate(payload) * 0.003
+    # This tail stays above the idle threshold, as can happen after a live burst.
+    tail = np.full(block * 3, 1e-4 + 1e-4j, dtype=np.complex64)
+    stream = np.concatenate((samples, tail))
+    assert len(stream) < tx.sample_count(tx.max_frame)
+    decoded = []
+    for start in range(0, len(stream) - block + 1, block):
+        decoded.extend(rx.feed(stream[start : start + block]))
+    assert decoded == [payload]
+
+
+def test_qpsk_partial_length_schedules_complete_frame_and_reset_discards_it():
+    tx = QPSKModem(16, max_frame=1024, sample_rate=2_000_000)
+    rx = QPSKModem(16, max_frame=1024, sample_rate=2_000_000)
+    samples = tx.modulate(bytes(range(100)))
+    assert list(rx.feed(samples[: len(samples) // 2])) == []
+    assert rx._pending_frame_samples is not None
+    assert rx._pending_frame_samples >= len(samples) - rx.sps
+    rx.reset()
+    assert rx._pending_frame_samples is None
+    assert rx._next_live_search_samples == 0
+    assert list(rx.feed(samples)) == [bytes(range(100))]
+
+
+def test_qpsk_rolling_acquisition_preserves_all_offsets_and_packet_order():
+    """Rolling sums must retain early weaker packets at every sample alignment."""
+    rng = np.random.default_rng(20261022)
+    for rolloff in (0.0, 0.35):
+        tx = QPSKModem(16, max_frame=256, rrc_rolloff=rolloff)
+        for offset in range(16):
+            first, second = b"earlier weaker packet", bytes(range(100))
+            stream = np.concatenate(
+                (
+                    np.zeros(4096 + offset, dtype=np.complex64),
+                    tx.modulate(first) * 0.05,
+                    np.zeros(257, dtype=np.complex64),
+                    tx.modulate(second),
+                    np.zeros(4096, dtype=np.complex64),
+                )
+            )
+            noise = rng.normal(0, 0.0001, len(stream)) + 1j * rng.normal(0, 0.0001, len(stream))
+            rx = QPSKModem(16, max_frame=256, rrc_rolloff=rolloff)
+            assert list(rx.feed(stream + noise)) == [first, second], (rolloff, offset)
