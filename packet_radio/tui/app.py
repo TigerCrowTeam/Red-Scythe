@@ -1,6 +1,6 @@
 """Keyboard-driven project editing, hardware checks and owned radio lifecycle controls.
 
-Explicit hardware checks run in cancellable child processes. Project persistence
+Startup discovery and explicit hardware checks run in cancellable child processes. Project persistence
 uses validated, atomic node/profile saves. Widgets delegate parsing and
 radio validation to the configuration services.
 """
@@ -35,7 +35,7 @@ from packet_radio.configuration.storage import (
 )
 from packet_radio.runtime.controller import RadioController
 from packet_radio.tui.dialogs import DiscardDialog, PathDialog, PeerDialog
-from packet_radio.tui.hardware import HardwareDialog
+from packet_radio.tui.hardware import DeploymentDialog, HardwareDialog
 from packet_radio.tui.run import RunDetails, SaveBeforeRunDialog, StartDialog, describe
 from packet_radio.tui.widgets import Entries, FieldRow, field_id
 
@@ -55,6 +55,7 @@ class RadioEditor(App):
         ("f8", "first_error", "Go to error"),
         ("f2", "advanced", "Advanced"),
         ("f9", "refresh_devices", "Refresh devices"),
+        ("ctrl+d", "detect_setup", "Detect setup"),
         ("f10", "check_hardware", "Check hardware"),
         ("ctrl+p", "check_pair", "Check X310 pair"),
         ("f11", "cancel_hardware", "Cancel check"),
@@ -103,9 +104,12 @@ class RadioEditor(App):
     #peer-dialog Horizontal { height: 3; }
     """
 
-    def __init__(self, session=None):
+    def __init__(self, session=None, *, auto_detect=False, node_role=None):
         super().__init__()
         self.session = session or FormSession.new()
+        self.auto_detect = auto_detect
+        self.node_role = node_role
+        self.setup_snapshot = None
         self.advanced = False
         self.pending = {}
         self.table_buffers = {}
@@ -146,6 +150,7 @@ class RadioEditor(App):
             )
             yield Checkbox("Advanced", id="advanced")
         yield Static(self.hardware_status, id="hardware-status", markup=False)
+        yield Static("", id="deployment-status", markup=False)
         yield Static(
             "Stopped · Ctrl+R start · Ctrl+T stop · F12 details", id="run-status", markup=False
         )
@@ -163,6 +168,8 @@ class RadioEditor(App):
     async def on_mount(self):
         await self.render_form()
         self.set_interval(0.25, self.update_run_status)
+        if self.auto_detect:
+            self.begin_setup_detection()
 
     async def render_form(self, focus_key=None):
         self.ready = False
@@ -695,6 +702,8 @@ class RadioEditor(App):
                 if "devices" in self.hardware_result
                 else "Hardware compatible at check time · F3 details"
             )
+            if request.get("setup"):
+                await self.show_detected_setup(self.hardware_result.get("devices", []))
         except asyncio.CancelledError:
             self.hardware_status = "Hardware check cancelled · Hardware unverified"
         except (ValueError, OSError, RuntimeError) as exc:
@@ -704,6 +713,66 @@ class RadioEditor(App):
 
     def action_refresh_devices(self):
         self.start_hardware_job({"action": "discover"})
+
+    def action_detect_setup(self):
+        self.guarded(self.begin_setup_detection)
+
+    def begin_setup_detection(self):
+        self.setup_snapshot = snapshot(self.session.draft)
+        self.start_hardware_job({"action": "discover", "setup": True})
+
+    def setup_unchanged(self):
+        return (
+            self.setup_snapshot == snapshot(self.session.draft)
+            and not self.pending
+            and not self.table_buffers
+            and not self.controller.active
+            and not any(t.dirty for t in self.main_screen.query(Entries))
+        )
+
+    async def show_detected_setup(self, devices):
+        from packet_radio.configuration.deployment import available_deployments
+
+        if not self.setup_unchanged():
+            raise ValueError(
+                "Draft changed during discovery. Use Detect setup again; edits were preserved."
+            )
+        choices = available_deployments(devices)
+        if not choices:
+            raise ValueError(
+                "No identified B205 or X310 found. Connect a radio and use Ctrl+D; offline editing remains available."
+            )
+        if len(choices) == 1 and (choices[0].mode == "shared-x310" or self.node_role):
+            await self.use_detected_setup((choices[0], self.node_role))
+        else:
+            self.push_screen(DeploymentDialog(choices, self.node_role), self.use_detected_setup)
+
+    async def use_detected_setup(self, choice):
+        if choice is None:
+            return
+        if not self.setup_unchanged():
+            self.hardware_status = (
+                "Setup was not applied because the draft changed; use Ctrl+D again."
+            )
+            self.update_hardware_status()
+            return
+        from packet_radio.configuration.deployment import new_deployment
+
+        selected, role = choice
+        try:
+            self.session = FormSession(new_deployment(selected, role))
+        except ValueError as exc:
+            self.hardware_status = str(exc)
+            self.update_hardware_status()
+            return
+        self.replacing_project = True
+        self.pending.clear()
+        self.errors.clear()
+        self.table_buffers.clear()
+        self.hardware_status = (
+            f"Detected {selected.model} · {selected.mode} · Save this draft before starting"
+        )
+        await self.render_form()
 
     async def action_check_hardware(self):
         if await self.valid_for_write():
@@ -786,6 +855,17 @@ class RadioEditor(App):
         if not self.ready or not self.screen_stack or not self.main_screen.query("#run-status"):
             return
         c = self.controller
+        config = self.session.report.config
+        if config is not None:
+            device_type = config.sdr.device.get("type")
+            mode = (
+                "X310 · Start runs both local simple-frame channels"
+                if device_type == "x300" and config.packet_format == "simple-frame-v1"
+                else "B205 · Start runs this computer's node; the other computer communicates over RF"
+                if device_type == "b200"
+                else "Manual setup · Use Start pair for a saved X310 peer"
+            )
+            self.main_screen.query_one("#deployment-status", Static).update(mode)
         if not c.active and self.hardware_status.startswith("Radio owns the device"):
             self.hardware_status = (
                 "Hardware unverified after radio shutdown · F9 refresh · F10 check"
@@ -829,7 +909,13 @@ class RadioEditor(App):
 
     async def action_start_radio(self):
         if await self.ready_to_start():
-            self.offer_start()
+            config = self.session.report.config
+            auto_pair = (
+                config is not None
+                and config.sdr.device.get("type") == "x300"
+                and config.packet_format == "simple-frame-v1"
+            )
+            self.offer_start(auto_pair=auto_pair)
 
     async def action_start_pair(self):
         if await self.ready_to_start():
@@ -838,13 +924,22 @@ class RadioEditor(App):
                 lambda path: self.offer_start(path) if path else None,
             )
 
-    def offer_start(self, peer_path=None):
+    def offer_start(self, peer_path=None, *, auto_pair=False):
         # A cancelled pair dialog must not accidentally launch a single node.
         try:
             check_sources(self.session.draft)
             drafts = [self.session.draft]
             if peer_path:
                 drafts.append(RadioDraft.load(peer_path))
+            if auto_pair:
+                from packet_radio.configuration.deployment import shared_peer
+
+                drafts.append(
+                    shared_peer(
+                        self.session.draft,
+                        self.session.draft.node_path.with_name("generated-peer.yaml"),
+                    )
+                )
             configs = []
             for draft in drafts:
                 report = draft.validate()
@@ -853,19 +948,26 @@ class RadioEditor(App):
                 configs.append(report.config)
             if len(drafts) == 2:
                 validate_shared_pair(configs)
-            self.push_screen(StartDialog(configs), lambda opt_in: self.launch_radio(drafts, opt_in))
+            self.push_screen(
+                StartDialog(configs),
+                lambda opt_in: self.launch_radio(
+                    drafts[:1] if auto_pair else drafts, opt_in, auto_pair=auto_pair
+                ),
+            )
         except (ValueError, OSError) as exc:
             self.run_notice = "Cannot start: " + str(exc)
             self.update_run_status()
 
-    def launch_radio(self, drafts, opt_in):
+    def launch_radio(self, drafts, opt_in, *, auto_pair=False):
         if opt_in is None:
             return
         if self.hardware_task is not None and not self.hardware_task.done():
             self.run_notice = "Finish the hardware check before starting."
             return
         try:
-            self.controller.start(drafts, allow_unauthenticated=opt_in)
+            self.controller.start(
+                drafts, allow_unauthenticated=opt_in, **({"shared_pair": True} if auto_pair else {})
+            )
             self.run_notice = ""
             self.hardware_signature = None
             self.hardware_result = None

@@ -22,6 +22,43 @@ setup. B205 operation needs workload-specific validation, and independent-host
 testing remains deferred. See the calculated [hop/payload tables](../MODULATION_RESULTS.md)
 and [UHD setup](UHD_SETUP.md).
 
+## Automatic hardware selection
+
+A new `packet-radio-ui` session discovers local hardware. B205 mode owns one
+radio and one application node on this computer. The other computer runs its
+own instance and B205. X310 simple-frame mode owns both channels and both nodes
+in one process, preserving the existing self-contained setup. Neither mode
+needs a separate program build. Discovery does not transmit or prove that a
+remote node is present.
+
+Choose computer A on one B205 host and B on the other, or pass `--node-role a`
+and `--node-role b` when opening new GUI sessions. Save these choices in each
+local project. Initial automatic projects use matching fixed-frequency,
+bidirectional simple frames. They require no shared wall-clock epoch. Independent
+host hopping needs a separate synchronization design and is rejected by the
+automatic B205 binding path; X310 hopping remains available unchanged.
+
+Start uses one node for a B205 and generates a complementary simple-frame peer
+for an X310. The generated peer uses the other channel, separate local UDP/status
+ports, and the same waveform/frame definition. Its saved runtime snapshot is
+temporary and does not modify the user's project. Peer recording is disabled;
+use the existing Start pair flow with two explicit saved nodes for separate
+recording paths or generic-v5 authentication identities.
+
+Saved projects are opened without automatic rewriting. Ctrl+D starts a new
+detected setup, with the normal unsaved-edit protection. Discovery results are
+not applied if the draft changes while discovery runs. `packet-radio-ui --offline`
+retains the original offline editing workflow. The headless CLI opts into
+selection with `--auto-device`; without it, explicit device and peer settings
+keep their existing behavior. Detection never silently reduces a hop rate or
+changes framing to accommodate a different SDR.
+
+The local Packet Builder/UDP endpoint sends bytes to its own radio. Received
+radio packets are delivered to the local application on the other computer.
+No computer-to-computer UDP connection is used. Simple frames have no ACK/retry
+or negotiation: both users must choose matching waveform and packet settings.
+A local ready state is not confirmation of remote packet reception.
+
 ## Configuration
 
 Commands and inline file paths are relative to the repository root or a writable

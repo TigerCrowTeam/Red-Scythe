@@ -41,6 +41,36 @@ when updating an older `telemetry-radio` installation.
 - [Program guide](docs/PROGRAM_GUIDE.md) — what the radio does, its architecture, data flow and runtime behavior.
 - [Terminal GUI guide](docs/TERMINAL_GUI_GUIDE.md) — editable fields, choices, units and limits for radio setup and packet building.
 
+## Automatic SDR setup
+
+Run `packet-radio-ui` for a new project. It discovers local UHD devices without
+starting streams. One B205 selects a single node on this computer; one X310
+selects the shared two-channel simple-frame setup. Multiple supported SDRs require
+an explicit selection. No SDR found leaves the offline editor available.
+
+For two computers, install the same program and matching UHD bindings on each,
+attach one B205 to each computer, and choose different roles:
+
+```bash
+# Computer A
+packet-radio-ui --node-role a
+# Computer B
+packet-radio-ui --node-role b
+```
+
+Save each local project and use Start. The initial setup is bidirectional 2FSK,
+915 MHz, 250 kbit/s, with simple frames and a fixed frequency. Keep the waveform
+and packet settings matched on both computers. UDP endpoints stay on localhost;
+the computers exchange packet data through their SDRs, not a LAN connection.
+This first automatic two-computer setup does not provide synchronized hopping.
+
+Use `--offline` to skip startup discovery, or Ctrl+D to detect a new setup from
+the editor. Opening a saved project preserves its hardware and radio settings.
+For headless operation, `packet-radio --config NODE.yaml --auto-device` selects
+the local SDR; `--sdr-serial SERIAL` resolves multiple devices. Explicit
+`--config NODE_A --peer-config NODE_B` X310 operation remains supported.
+See [two-computer setup and the first packet check](docs/UHD_SETUP.md#two-computers-with-one-b205-each).
+
 ## Repository layout
 
 ```text

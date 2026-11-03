@@ -8,6 +8,7 @@ errors are reported as command-line failures.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import os
 from dataclasses import replace
@@ -21,6 +22,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="General-purpose SDR packet radio")
     parser.add_argument("--config", required=True, help="path to YAML configuration")
     parser.add_argument("--peer-config", help="second channel profile on the same X310")
+    parser.add_argument(
+        "--auto-device",
+        action="store_true",
+        help="discover a local B205 or X310 and choose single-node or shared-pair operation (schema 2)",
+    )
+    parser.add_argument(
+        "--sdr-serial", help="choose this serial when automatic discovery finds several radios"
+    )
     parser.add_argument(
         "--status",
         choices=("off", "text", "json"),
@@ -44,6 +53,8 @@ def main() -> None:
     parser.add_argument("--ready-fd", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--run-id", help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.sdr_serial and not args.auto_device:
+        parser.error("--sdr-serial requires --auto-device")
     timing_options: dict[str, Any] = {"timing_diagnostics": True} if args.timing_diagnostics else {}
     if args.run_id is not None:
         timing_options["run_id"] = args.run_id
@@ -56,6 +67,38 @@ def main() -> None:
         timing_options["on_ready"] = ready
     try:
         config = load_config(args.config)
+        peer = None
+        if args.auto_device:
+            from packet_radio.configuration.deployment import (
+                bind_device,
+                select_deployment,
+                shared_peer,
+            )
+            from packet_radio.configuration.draft import RadioDraft
+            from packet_radio.configuration.preflight import HardwareJob
+
+            discovered = asyncio.run(HardwareJob().run({"action": "discover"}))
+            selected = select_deployment(discovered["devices"], serial=args.sdr_serial)
+            local = bind_device(RadioDraft.load(args.config), selected)
+            resolved = local.validate().config
+            assert resolved is not None
+            config = resolved
+            if selected.mode == "shared-x310":
+                other = (
+                    bind_device(RadioDraft.load(args.peer_config), selected)
+                    if args.peer_config
+                    else shared_peer(local, local.node_path.with_name("generated-peer.yaml"))
+                )
+                peer = other.validate().config
+                assert peer is not None
+            elif args.peer_config:
+                raise ValueError(
+                    "B205 two-computer mode starts only the local node; run the remote profile on the other computer."
+                )
+            print(
+                f"Detected {selected.model}: {selected.mode}; device={selected.arguments}",
+                flush=True,
+            )
         if (
             config.packet_format == "generic-v5"
             and config.authentication.private_key_file is None
@@ -82,12 +125,12 @@ def main() -> None:
             level=getattr(logging, config.log_level.upper(), logging.INFO),
             format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         )
-        if args.peer_config is None:
+        if args.peer_config is None and peer is None:
             run(config, **timing_options)
         else:
             from packet_radio.hardware.shared import run_pair
 
-            peer = load_config(args.peer_config)
+            peer = peer or load_config(args.peer_config)
             if (
                 peer.packet_format == "generic-v5"
                 and peer.authentication.private_key_file is None

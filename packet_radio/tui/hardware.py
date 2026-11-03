@@ -82,3 +82,51 @@ class HardwareDialog(ModalScreen):
             self.dismiss(self.result["devices"][index])
         else:
             self.dismiss(None)
+
+
+class DeploymentDialog(ModalScreen):
+    """Choose a local board and the role that discovery cannot infer remotely."""
+
+    BINDINGS = [("escape", "dismiss(None)", "Keep editing")]
+
+    def __init__(self, devices, role=None):
+        super().__init__()
+        self.devices = devices
+        self.role = role
+
+    def compose(self):
+        with VerticalScroll(id="hardware-dialog"):
+            yield Static("Detected SDR setup", markup=False)
+            yield Select(
+                [(f"{d.model} · {d.arguments} · {d.mode}", i) for i, d in enumerate(self.devices)],
+                value=0,
+                allow_blank=False,
+                id="deployment-device",
+            )
+            yield Static(
+                "B205: one node on this computer; choose A on one computer and B on the other. "
+                "X310: both simple-frame nodes on this computer. "
+                "This creates a new fixed-frequency draft; it does not transmit.",
+                markup=False,
+            )
+            yield Select(
+                [("Computer A", "a"), ("Computer B", "b")],
+                value=self.role or Select.NULL,
+                prompt="Choose this computer's role",
+                id="deployment-role",
+            )
+            yield Static("", id="deployment-error", markup=False)
+            with Horizontal():
+                yield Button("Use detected setup", id="deployment-use", variant="primary")
+                yield Button("Keep editing", id="deployment-cancel")
+
+    def on_button_pressed(self, event):
+        if event.button.id != "deployment-use":
+            self.dismiss(None)
+            return
+        selected = self.devices[self.query_one("#deployment-device", Select).value]
+        role = self.query_one("#deployment-role", Select).value
+        if selected.mode == "remote-b205" and role is Select.NULL:
+            self.query_one("#deployment-error", Static).update("Choose A or B for this computer.")
+            return
+        self.dismiss((selected, None if role is Select.NULL else role))

@@ -144,7 +144,7 @@ def main() -> None:
                     for node in network.nodes.values()
                 )
             print(f"{modulation}: installed profiles and signed binary delivery passed")
-        for kind in ("generic", "simple", "hopping", "simple-100k", "simple-500k"):
+        for kind in ("generic", "simple", "hopping", "simple-100k", "simple-500k", "b205-two-host"):
             subprocess.run(
                 [
                     str(Path(sys.executable).parent / "packet-radio-validate"),
@@ -163,6 +163,7 @@ def main() -> None:
             configs = {
                 peer: replace(
                     config,
+                    status=replace(config.status, output="off", http_enabled=False),
                     sdr=replace(config.sdr, decoder_worker_enabled=False),
                     link=replace(config.link, hardware_timed_io=False),
                     authentication=(

@@ -1,6 +1,6 @@
 """Bounded, cancellable hardware checks in an owned subprocess, independent of Textual.
 
-Only explicit discovery or preflight opens UHD. Results describe one configuration
+Discovery and preflight load UHD only inside the disposable worker. Results describe one configuration
 snapshot, not RF qualification. No streams, key files or persistent reports are created.
 """
 

@@ -247,6 +247,73 @@ p95 RTT at most one second. The reports include missing sequences, profile hashe
 configuration/hardware snapshots and stream deltas. These are diagnostic outputs;
 `MODULATION_RESULTS.md` is limited to the hop/payload/packet-size tables.
 
+## Two computers with one B205 each
+
+Install the same wheel (including the UI extra when using the editor) and the
+Python-matched UHD bindings on both computers. Connect one B205 to each host.
+Use a new GUI session on each:
+
+```bash
+# Computer A
+packet-radio-ui --node-role a
+# Computer B
+packet-radio-ui --node-role b
+```
+
+Discovery binds the local B205 serial and channel 0. Save a local node on each
+computer, check its hardware, then Start on both. A missing or unsupported SDR
+leaves the editor usable; Ctrl+D retries detection. If several radios are found,
+select the intended device. Opening an existing node preserves its saved selector.
+
+The shipped headless examples use bidirectional simple frames at fixed 915 MHz,
+250 kbit/s, 2 Msps, 1 MHz bandwidth, conservative 0 dB gains, TX/RX transmit and
+RX2 receive antennas. Adjust gains for the actual link and keep waveform/frame
+settings identical at both ends. From a checkout or a copied installed `configs/`
+directory:
+
+```bash
+# Computer A
+packet-radio --config configs/v1_1/peer-a-b205-two-host.yaml --auto-device
+# Computer B
+packet-radio --config configs/v1_1/peer-b-b205-two-host.yaml --auto-device
+```
+
+Add `--sdr-serial SERIAL` if several supported devices are visible. Automatic
+selection checks the discovered model, not just UHD's broad `b200`/`x300` family.
+It does not rewrite the saved file. No remote IP address is required: both nodes
+use local UDP input 50000, local UDP delivery 50001, and local HTTP status 8765.
+Identical port numbers on different computers do not conflict. GUI-generated
+projects likewise keep application UDP on 127.0.0.1.
+
+To check the first packet, start a local receiver on computer B **before** sending
+from A. Close any other application or Packet Builder listener on that same
+UDP delivery port:
+
+```bash
+# Computer B, separate terminal while its radio runs
+packet-radio-payload receive --count 1 --timeout 30
+# Computer A, separate terminal while its radio runs
+packet-radio-payload send --text 'hello from A'
+```
+
+Repeat with A receiving and B sending. The receiver prints the exact payload as
+hexadecimal. Submission to UDP does not prove RF reception. Use the local GUI
+status or `packet-radio-status` to inspect packet/stream counters. The data path
+is local application → local UDP → local B205 → RF → remote B205 → remote UDP →
+remote application. No LAN traffic carries the radio payload between computers.
+
+This initial automatic setup is fixed-frequency and ACK-free; it provides no
+remote negotiation or automatic retransmission. Separate computer clocks do not
+need alignment for this mode. Automatic B205 binding rejects hopping profiles;
+independent-host hopping needs explicit synchronization and qualification. This
+is software-validated setup support, not a completed two-computer RF qualification.
+
+For the X310, `packet-radio-ui` instead detects the shared board. With simple
+frames, Start generates a complementary channel with separate local ports.
+The headless `--auto-device` path does the same for a simple-frame source node.
+Generic-v5 needs an explicit peer profile for its identities/keys. Existing
+explicit X310 commands below remain supported, including hopping.
+
 ## Two endpoints on one X310
 
 The X310/UBX shared-channel setup is the reference configuration. Hardware

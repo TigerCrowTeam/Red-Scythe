@@ -13,6 +13,22 @@ you the allowed inputs and how changing the value affects the radio.
 - [Packet Builder](#build-modify-and-inspect-packets)
 - [Peer setup](#peer-setup-fields) · [Other dialog inputs](#other-dialog-inputs)
 
+## Detected setup inputs
+
+New GUI sessions discover local SDRs; `--offline` skips this. Ctrl+D repeats setup
+detection for a new draft. Saved projects retain their settings when reopened.
+
+| Field | Allowed inputs | What it changes |
+|---|---|---|
+| **Detected SDR** | An identified B205/B205mini or X310 from the discovered-device list. | B205 selects one local radio node; X310 selects the local two-channel simple-frame setup. A single supported radio is selected automatically once any required role is known. Multiple radios require a selection. |
+| **Computer role** | `Computer A` or `Computer B`. Required for B205 setup. | Sets complementary node IDs and leader/follower roles. Choose A on one computer and B on the other. This does not discover the remote computer. `--node-role a` or `--node-role b` can supply the initial choice. |
+| **Use detected setup** | Select to create the draft; **Keep editing** cancels. | Creates a fixed-frequency, bidirectional draft for the selected hardware. Save and Start remain separate actions. Draft edits made during discovery are preserved. |
+
+For B205 projects, Start launches only this computer's node. For simple-frame
+X310 projects, Start generates the other local channel automatically. Start pair
+still accepts two saved X310 nodes for explicit peer settings. Both B205 hosts
+must use matching radio/packet settings; their UDP endpoints remain local.
+
 ## Terminal configuration and operation
 
 Use the **section selector** to jump to a group. Check **Advanced** (or press F2)

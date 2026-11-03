@@ -44,7 +44,7 @@ class RadioController:
     def active(self):
         return self.task is not None and not self.task.done()
 
-    def start(self, drafts: list[RadioDraft], *, allow_unauthenticated=False):
+    def start(self, drafts: list[RadioDraft], *, allow_unauthenticated=False, shared_pair=False):
         if self.active:
             raise ValueError("A radio is already starting, running or stopping. Stop it first.")
         self.state = "Validating"
@@ -62,11 +62,11 @@ class RadioController:
             copy.source_versions = draft.source_versions.copy()
             copy.read_only_source = draft.read_only_source
             owned.append(copy)
-        self.task = asyncio.create_task(self._supervise(owned, allow_unauthenticated))
+        self.task = asyncio.create_task(self._supervise(owned, allow_unauthenticated, shared_pair))
 
-    async def _supervise(self, drafts, allow_unauthenticated):
+    async def _supervise(self, drafts, allow_unauthenticated, shared_pair=False):
         try:
-            await self._run(drafts, allow_unauthenticated)
+            await self._run(drafts, allow_unauthenticated, shared_pair)
         except Exception as exc:
             self.error = f"Radio lifecycle failed: {exc}"
             self.state = "Failed"
@@ -76,7 +76,7 @@ class RadioController:
         while data := await stream.read(4096):
             self.logs.extend(data.decode(errors="replace").splitlines())
 
-    def _prepare(self, drafts, directory, allow_unauthenticated):
+    def _prepare(self, drafts, directory, allow_unauthenticated, shared_pair=False):
         if len(drafts) not in (1, 2):
             raise ValueError("Start one saved node or a shared X310 pair.")
         configs = []
@@ -99,6 +99,16 @@ class RadioController:
                     "Authentication requires keys or an explicit isolated-bench unauthenticated opt-in."
                 )
             configs.append(config)
+        if shared_pair:
+            if len(drafts) != 1:
+                raise ValueError("Automatic pairing takes one saved X310 node.")
+            from packet_radio.configuration.deployment import shared_peer
+
+            peer = shared_peer(drafts[0], Path(directory) / "generated-peer.yaml")
+            drafts = [*drafts, peer]
+            peer_config = peer.validate().config
+            assert peer_config is not None
+            configs.append(peer_config)
         if len(configs) == 2:
             validate_shared_pair(configs)
         paths = []
@@ -111,7 +121,7 @@ class RadioController:
         self.sources = [str(d.node_path) for d in drafts]
         return paths
 
-    async def _run(self, drafts, allow_unauthenticated):
+    async def _run(self, drafts, allow_unauthenticated, shared_pair=False):
         readers = []
         monitoring = None
         read_fd = write_fd = None
@@ -120,7 +130,7 @@ class RadioController:
         failure = ""
         with tempfile.TemporaryDirectory(prefix="packet-radio-run-") as directory:
             try:
-                paths = self._prepare(drafts, directory, allow_unauthenticated)
+                paths = self._prepare(drafts, directory, allow_unauthenticated, shared_pair)
                 read_fd, write_fd = os.pipe()
                 reader = asyncio.StreamReader()
                 protocol = asyncio.StreamReaderProtocol(reader)
