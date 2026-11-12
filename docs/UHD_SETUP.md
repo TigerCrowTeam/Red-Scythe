@@ -939,3 +939,27 @@ promise of operation on every frequency between the tested centers.
 
 The compact operating-point tables are in `MODULATION_RESULTS.md`. The normal
 GUI limits and the X310 configuration remain unchanged.
+
+
+### X310 pre-merge smoke test — 2026-11-12
+
+X310 serial `3267DE0` at `192.168.10.2` passed the short shared-channel
+regression check after the two-computer B205 changes. The existing crossed,
+30 dB attenuated channel paths used simple-frame 2FSK at 915 MHz and
+250 kbit/s. `tools/simple_link_check.py --shared-device` with the two
+`peer-*-x310-simple.yaml` profiles, `--count 20 --interval 0.2`, delivered
+25/25 exact packets in each direction, including 1-, 64- and 1024-byte
+payload boundaries and repeated payloads. Submitted waveform sizes matched,
+stream error deltas were zero, and device close/reopen completed cleanly.
+
+A headless Textual smoke check exercised the actual GUI and UHD hardware,
+without mocked discovery or radio controls. Automatic discovery selected the
+X310; Save and Start created one owned process for channels 0 and 1, both
+status endpoints became live, and simultaneous local UDP injection delivered
+10/10 exact RF payloads to each receiver. All monitored traffic-phase error
+deltas were zero. GUI Stop released the device. UHD emitted its socket-buffer
+size warning, but no corresponding errors occurred in these workloads.
+
+This verifies the short fixed-frequency startup/data/shutdown path; it does
+not replace the existing modulation or hopping qualifications. The software
+suite immediately before this hardware check passed all 2182 tests.
