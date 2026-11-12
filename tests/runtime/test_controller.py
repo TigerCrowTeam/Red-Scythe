@@ -292,3 +292,29 @@ def test_missing_key_fails_real_child_before_hardware_access(tmp_path):
         assert c.monitor is None
 
     asyncio.run(exercise())
+
+
+def test_auto_shared_pair_is_frozen_and_generated_peer_is_temporary(tmp_path):
+    from packet_radio.configuration.deployment import deployment, new_deployment
+    from tests.configuration.test_deployment import X310
+
+    async def exercise():
+        source = save_project(new_deployment(deployment(X310)), tmp_path / "x310.yaml")
+        original = source.node_path.read_bytes()
+        c = controller()
+        c.start([source], shared_pair=True)
+        await wait_state(c, "Running")
+        try:
+            assert [cfg.sdr.channel for cfg in c.running_configs] == [0, 1]
+            assert c.running_configs[0].emulation == c.running_configs[1].emulation
+            temporary = Path(
+                next(line[9:] for line in c.logs if line.startswith("SNAPSHOT="))
+            ).parent
+            assert (temporary / "node-1.yaml").exists()
+            assert source.node_path.read_bytes() == original
+            assert not (tmp_path / "generated-peer.yaml").exists()
+        finally:
+            await c.stop()
+        assert not temporary.exists()
+
+    asyncio.run(exercise())

@@ -1,0 +1,33 @@
+# One B205 on this computer. Use --auto-device to bind its discovered serial.
+# Conducted bench: 30 dB attenuation on BOTH TX/RX -> peer RX2 paths.
+# TX 20 dB / RX 40 dB were checked on B205mini serials 3457464 and 3457480.
+# These UDP/status addresses are local on each host; the peer link is RF.
+schema_version: 2
+profile: ../profiles/simple-2fsk-v1.yaml
+node_id: 2
+peer_id: 1
+timing_role: follower
+operation: bidirectional
+input_kind: payload
+hardware:
+  device:
+    type: b200
+  tx_gain: 20
+  rx_gain: 40
+  tx_antenna: TX/RX
+  rx_antenna: RX2
+  channel: 0
+runtime:
+  decoder_worker_enabled: true
+  hardware_timed_io: true
+  hardware_timed_tx_lead_seconds: 0.01
+  queue_size: 256
+endpoint:
+  bind_host: 127.0.0.1
+  bind_port: 50000
+  destination_host: 127.0.0.1
+  destination_port: 50001
+status:
+  output: text
+  http_port: 8765
+  http_enabled: true

@@ -186,13 +186,14 @@ a diagnostic spectral measurement, not calibrated SNR or power in dBm.
 
 The [payload tables](../MODULATION_RESULTS.md) contain calculated hopping capacity,
 not hardware qualification records.
-The local runner uses two processes on one computer; independent-host acceptance
-remains deferred. Do not infer performance at untested rates, gains or frequencies.
+The local runner uses two processes on one computer. Separate-host results and
+the maintained SSH-controlled checker are documented below. Do not infer performance at untested rates, gains or frequencies.
 
 ## Coordinated two-computer UDP checks
 
-This workflow is software-tested with real loopback UDP. Physical two-host
-qualification remains deferred; it is not implied by local two-SDR results.
+This manual workflow remains available when SSH control is not desired. For
+automated ownership of both radio processes and the completed separate-host
+qualification, use `packet-radio-check pair` below.
 
 Run `python -m packet_radio --config <local-profile>` on each computer with its
 own SDR and provisioned, mutually trusted keys. Use the same RF/modem/protection
@@ -246,6 +247,94 @@ stream or endpoint errors and no retry exhaustion; echo additionally requires
 p95 RTT at most one second. The reports include missing sequences, profile hashes,
 configuration/hardware snapshots and stream deltas. These are diagnostic outputs;
 `MODULATION_RESULTS.md` is limited to the hop/payload/packet-size tables.
+
+## Two computers with one B205 each
+
+Install the same wheel (including the UI extra when using the editor) and the
+Python-matched UHD bindings on both computers. Connect one B205 to each host.
+Use a new GUI session on each:
+
+```bash
+# Computer A
+packet-radio-ui --node-role a
+# Computer B
+packet-radio-ui --node-role b
+```
+
+Discovery binds the local B205 serial and channel 0. Save a local node on each
+computer. For the crossed 30 dB attenuated B205 bench, set TX gain to `20 dB`
+and RX gain to `40 dB` on both nodes before saving; new GUI drafts still start
+at 0 dB. Check hardware, then Start on both. A missing or unsupported SDR
+leaves the editor usable; Ctrl+D retries detection. If several radios are found,
+select the intended device. Opening an existing node preserves its saved selector.
+
+The shipped headless examples use bidirectional simple frames at fixed 915 MHz,
+250 kbit/s, 2 Msps, 1 MHz bandwidth, TX gain 20 dB, RX gain 40 dB, TX/RX
+transmit and RX2 receive antennas. These are conducted bench settings for a
+30 dB attenuator in each crossed coax path, not general over-the-air defaults.
+Keep waveform/frame settings identical at both ends. From a checkout or a copied installed `configs/`
+directory:
+
+```bash
+# Computer A
+packet-radio --config configs/v1_1/peer-a-b205-two-host.yaml --auto-device
+# Computer B
+packet-radio --config configs/v1_1/peer-b-b205-two-host.yaml --auto-device
+```
+
+Add `--sdr-serial SERIAL` if several supported devices are visible. Automatic
+selection checks the discovered model, not just UHD's broad `b200`/`x300` family.
+It does not rewrite the saved file. No remote IP address is required: both nodes
+use local UDP input 50000, local UDP delivery 50001, and local HTTP status 8765.
+Identical port numbers on different computers do not conflict. GUI-generated
+projects likewise keep application UDP on 127.0.0.1.
+
+To check the first packet, start a local receiver on computer B **before** sending
+from A. Close any other application or Packet Builder listener on that same
+UDP delivery port:
+
+```bash
+# Computer B, separate terminal while its radio runs
+packet-radio-payload receive --count 1 --timeout 30
+# Computer A, separate terminal while its radio runs
+packet-radio-payload send --text 'hello from A'
+```
+
+Repeat with A receiving and B sending. The receiver prints the exact payload as
+hexadecimal. Submission to UDP does not prove RF reception. Use the local GUI
+status or `packet-radio-status` to inspect packet/stream counters. The data path
+is local application → local UDP → local B205 → RF → remote B205 → remote UDP →
+remote application. No LAN traffic carries the radio payload between computers.
+
+This initial automatic setup is fixed-frequency and ACK-free; it provides no
+remote negotiation or automatic retransmission. Separate computer clocks do not
+need alignment for this mode. Automatic B205 binding accepts fixed frequency or
+generic-v5 `rf-leader` hopping. It rejects simple-frame external-UTC hopping; that
+mode cannot acquire an independent radio clock over RF.
+
+### Two-computer RF check — 2026-11-03
+
+B205mini A `3457464` on dev5 (UHD 4.9.0.1 / Python 3.14) and B
+`3457480` on dev10 (UHD 4.8.0.0 / Python 3.13) used the settings above,
+with Ethernet/SSH for control and local UDP endpoints for application data.
+Direct UHD tone checks showed inadequate received signal at TX gain 0 dB;
+TX 20 dB / RX 40 dB restored packet delivery through the attenuated paths.
+
+With the saved two-host profiles, A → B delivered **100/100** packets and
+B → A delivered **100/100**, checked one direction at a time. Each direction
+cycled through 100-, 256- and 1,024-byte payloads (34, 33 and 33 packets,
+respectively); every delivered payload matched byte for byte. The sender waited
+150 ms after each receive check. RX overflows/buffer drops/stream errors,
+decoder output drops, TX timeouts/underflows/stream errors, late timed TX,
+transmit errors/drops and endpoint errors all had zero counter increases.
+Both processes exited cleanly. This is a short connectivity check, not a
+throughput maximum, simultaneous-traffic test or sustained qualification.
+
+For the X310, `packet-radio-ui` instead detects the shared board. With simple
+frames, Start generates a complementary channel with separate local ports.
+The headless `--auto-device` path does the same for a simple-frame source node.
+Generic-v5 needs an explicit peer profile for its identities/keys. Existing
+explicit X310 commands below remain supported, including hopping.
 
 ## Two endpoints on one X310
 
@@ -634,3 +723,243 @@ remains one transport packet per send. The portable profiles retain their
 configuration and workload. It does not qualify those profiles on every device or
 establish target-radio interoperability. Complete delivery alone does not clear
 an observed UHD underflow.
+
+## Maintained two-computer RF check
+
+Install the same project build on both hosts. Stop GUI-owned radio processes first,
+then run this from computer A (adjust SSH user/address and paths for your hosts):
+
+```bash
+packet-radio-check pair \
+  --config /home/dev5/Documents/B205-Radio-Project/computer-a.yaml \
+  --peer-ssh dev10@192.168.10.10 \
+  --peer-python /home/dev10/Documents/Red-Scythe/.venv-uhd/bin/python \
+  --peer-config /home/dev10/Documents/B205-Radio-Project/computer-b.yaml \
+  --duration 60 --rate 5 --payload 256
+```
+
+The command owns both workers and radios, waits for local readiness, verifies
+matching resolved profiles, then checks A→B, B→A and simultaneous traffic for
+each modulation. Each host generates and verifies its own deterministic binary
+UDP payloads; SSH carries control and results only. The radio link does not need
+SSH or Ethernet during ordinary operation. Test intervals use local monotonic
+clocks and include a delivery grace period; no shared wall-clock epoch is needed.
+Each worker exits on controller EOF, idle timeout or failure and stops its radio.
+Clean worker shutdown is required for success.
+
+`--modulations 2fsk` selects a subset. `--duration`, `--rate` and `--payload`
+change the workload; payload sizes are 13–1024 bytes and must fit the loaded
+profile. The 13-byte run/source/sequence header is included in that size.
+Success requires every expected packet, no duplicate/unexpected payloads and
+zero increases in monitored stream, endpoint, transmission and retry-exhaustion
+errors. This is a workload check, not a throughput maximum. Optional
+`--summary NEW.md` writes only a final Markdown table and refuses to overwrite
+an existing file. No results file is required.
+
+### Fixed-frequency qualification — 2026-11-03
+
+Two computers, B205mini serials 3457464 and 3457480, crossed TX/RX→RX2 paths
+with 30 dB attenuation in each direction, TX 20 dB / RX 40 dB, 915 MHz,
+2 Msps, 250 kbit/s, simple-frame-v1, 256-byte payloads at 5 packets/s per sender.
+Each traffic mode ran for 60 seconds, with a three-second delivery grace.
+
+| Modulation | A→B | B→A | Simultaneous A received | Simultaneous B received | Monitored errors |
+|---|---:|---:|---:|---:|---:|
+| BPSK | 300/300 | 300/300 | 300/300 | 300/300 | 0 |
+| 2FSK | 300/300 | 300/300 | 300/300 | 300/300 | 0 |
+| MSK | 300/300 | 300/300 | 300/300 | 300/300 | 0 |
+| GMSK | 300/300 | 300/300 | 300/300 | 300/300 | 0 |
+| QPSK | 300/300 | 300/300 | 300/300 | 300/300 | 0 |
+
+All radio processes exited cleanly. A preceding 10-second-per-mode check also
+passed all five modulations at 50/50 packets per receiving endpoint. These
+results qualify the stated conducted workload, not range, interference tolerance,
+other gain/rate settings or arbitrary host loading.
+
+## RF-synchronized B205 hopping
+
+Use `configs/v1_1/peer-a-b205-rf-hopping.yaml` and
+`configs/v1_1/peer-b-b205-rf-hopping.yaml`, with the shared
+`generic-2fsk-b205-rf-hopping-v5.yaml` profile. Set each local SDR serial and
+provision each node's private signing key and both trusted public keys using
+`packet-radio-keys`. Keep private identities on their own hosts; exchange public
+keys and the identical shared profile. Preserve replay-state files across restarts.
+The regular GUI can edit, save and start each local node. The portable **Export
+project** flow remains limited to fixed/simple projects; use explicit node files
+for this authenticated mode.
+
+The initial profile uses generic-v5, 250 kbit/s, 2 Msps, 915/916 MHz, one hop/s,
+100 ms guards and `synchronization: rf-leader`. It requires B205 channel 0,
+timed I/O and hardware clock synchronization; TDD and hardware slot scheduling
+are disabled. Epoch must be zero. All five modem implementations support the
+mode, but software support is distinct from measured RF qualification below.
+Shared X310 simple-frame hopping and its external-UTC contract are unchanged.
+
+The follower initially parks on the first table frequency and inhibits TX. A
+matching signed leader SYNC supplies a hardware TX timestamp and profile
+fingerprint; local receive timestamps establish the offset/drift mapping. The
+hop schedule follows the leader's hardware clock, not matching computer UTC.
+The leader revisits the rendezvous frequency naturally as its table cycles.
+No GPS/PPS, NTP or LAN timing exchange is required. Larger/slower tables can
+extend acquisition time; the checker allows 40 seconds for initial acquisition.
+
+After 15 seconds without an accepted beacon, the follower inhibits TX, clears
+its clock estimate, and parks on the first frequency to reacquire. Receiving
+ordinary data does not keep the synchronization alive. Different profiles,
+stale timestamps and replayed/invalidly signed beacons cannot release TX.
+Raw IQ recording is rejected because retune segment metadata is not implemented.
+
+To test clock independence and loss/recovery, use the same checker with the
+RF-hopping node paths and add:
+
+```text
+--modulations 2fsk --duration 10 --rate 2 --payload 256 --peer-clock-offset 120 --recovery
+```
+
+The offset changes only the test child's injected clock, never the operating
+system clock. Recovery testing stops the local leader for 17 seconds, checks
+that the follower is unsynchronized with TX inhibited, restarts the leader,
+requires RF reacquisition and repeats simultaneous traffic. Computer A must be
+the leader for this test. The prepared bench node files are in
+`~/Documents/B205-RF-Hopping/` on each host; signing keys remain outside Git.
+
+### RF hopping qualification — 2026-11-03
+
+The same attenuated two-computer B205 bench passed signed generic-v5 **2FSK**
+at 1 hop/s across 915/916 MHz, 250 kbit/s, 2 Msps, 256-byte payloads and
+2 packets/s per sender. Each traffic mode ran for 10 seconds:
+A→B 20/20, B→A 20/20, simultaneous 20/20 at each receiver, and simultaneous
+after leader restart 20/20 at each receiver. All monitored error deltas were zero.
+The follower acquired with a test clock offset of +120 seconds (measured hardware
+mapping about +120.0094 seconds). After the 17-second leader outage it inhibited
+TX and reacquired within 1.62 seconds of the restart acknowledgement. Both workers
+confirmed clean shutdown.
+
+That run was a short synchronization/recovery qualification for 2FSK. The later
+B205 timing measurements are recorded in `MODULATION_RESULTS.md`; the longer
+fixed-frequency results above remain separate. All five modulations also have
+modem/codec acquisition regression tests. The X310 was not retested during these
+B205 sessions.
+
+### B205 timing experiments
+
+`packet-radio-check pair` also accepts `--experimental-hop-rate`,
+`--experimental-guard` (seconds, default 0.025), and
+`--experimental-sync-lead` (seconds, default 0.01). These are explicit,
+unqualified benchmark overrides for the RF-synchronized generic-v5 B205 mode;
+they do not change saved profiles or the GUI's supported 1 hop/s limit.
+The test payload becomes the experimental maximum packet size. The checker
+rejects schedules that cannot fit complete signed DATA, ACK and SYNC bursts
+with their guards and transmit leads before opening the radios. Retuning and
+host scheduling still need measurement; passing the airtime check is insufficient.
+
+Experimental bounds are 1–30 hops/s, 1–100 ms guards and 5–50 ms SYNC lead.
+Status reports the effective experimental configuration and a
+`benchmark_experiment` annotation. Its immutable runtime identity continues to
+identify the validated launch configuration. Recording must be disabled.
+Both workers must report the same requested experiment. The checker retains the
+source bit rate, sample rate and bandwidth when selecting modulation presets.
+
+
+The current conducted RF-hopping setup has serial **3457480 on dev5** (leader,
+TX 30 dB) and **3457464 on dev10** (follower, TX 60 dB), both RX 40 dB.
+Each TX/RX connects to the other radio's RX2 through a 30 dB attenuator.
+These settings are saved in each host's `~/Documents/B205-RF-Hopping/` project;
+the earlier fixed-frequency setup and shipped example gains are historical
+comparisons, not interchangeable qualification settings. The dev10 transmit
+path measured weaker in both crossed and local-loopback checks; increasing its
+TX gain restored return packet delivery. The measurements do not identify a
+specific faulty component.
+
+The timing sweep uses signed generic-v5, 915/916 MHz, 2 Msps, 1 MHz bandwidth,
+5 ms guards and 10 ms DATA/SYNC leads. BPSK, 2FSK, MSK and GMSK use 250 kbit/s;
+QPSK uses 500 kbit/s. QPSK at 250 kbit/s did not pass the RF baseline, including
+an RRC shaping trial, so its results must not be compared as an equal-bit-rate
+qualification. The normal GUI/profile limits remain unchanged.
+
+Short screening runs use 2.5 packets/s per sender. A reported qualified rate
+must additionally pass 20 seconds each of A-to-B, B-to-A, simultaneous traffic,
+and simultaneous traffic after a 17-second leader outage: 50/50 packets per
+receiving endpoint in each applicable phase, with zero monitored error deltas.
+Each phase uses fresh status polls for its before/after baseline; cumulative
+startup counters remain intact and are not attributed to later traffic.
+The follower uses a +120-second test clock offset. These are short conducted
+workload checks, not sustained throughput or an absolute hardware hop limit;
+smaller packets, different gains, host load or timing settings can change the
+boundary. Failed screening rates are excluded from the result tables. The next integer
+rate above each retained result failed either screening or the longer test.
+The search was adaptive; it was not an exhaustive characterization of every
+fractional rate or possible timing/payload configuration.
+
+RF synchronization beacons are rate-limited independently of the hop rate,
+with an additional bounded opportunity on the rendezvous frequency. This keeps
+control traffic from consuming every hop while allowing a parked follower to
+acquire the leader. Payloads, ACKs and beacons all traverse RF; SSH only controls
+the test workers. Every benchmark releases its owned radios when finished.
+
+
+### B205 frequency-span measurements
+
+The November 12, 2026 span sweep retained the same conducted wiring, serials,
+gains, sample rates and bit rates described above. Temporary profiles changed
+only the two hop centers: 915/916, 910.5/920.5, 865.5/965.5, 415.5/1415.5,
+or 70.5/5999.5 MHz. The last pair leaves 0.5 MHz at each nominal hardware range
+edge for the configured 1 MHz signal. Saved user projects were not changed.
+
+Fast screening retained each modulation's previously measured hop rate and
+32-byte payload, 5 ms guards and 10 ms DATA/SYNC leads. Four-second screening
+phases offered 2.5 packets/s per sender. Retained wider spans passed 10 seconds
+per direction, simultaneous traffic and simultaneous traffic after leader
+restart (25/25 per receiving endpoint, zero monitored error deltas). BPSK's
+1 MHz result retained its earlier 20-second qualification and passed a new
+screening control; its 10 MHz jump failed. All five original 1 MHz controls
+passed again. The search used coarse frequency pairs, not every possible span.
+
+Separate larger-packet tests used 1 hop/s, 100 ms guards, 10 ms DATA lead and
+50 ms SYNC lead. Each traffic phase lasted 10 seconds at 1 packet/s per sender
+(10/10 per applicable receiver, zero monitored error deltas); these runs did
+not include a restart. BPSK's 1024-byte baseline failed on the return path even
+at the original 1 MHz span, so its wider tests used 128 bytes. QPSK delivered
+the packets in its attempted 128/1024-byte phases but dev10 reported RX
+overflows, so neither larger-packet configuration was retained. This does not
+establish a fundamental modulation or payload-size limit.
+
+The selected endpoints were also tested individually at fixed frequency with
+signed generic-v5, five seconds per traffic phase and one packet/s per sender.
+BPSK (128 bytes), MSK (1024 bytes) and QPSK (32 bytes) passed all three traffic
+phases at both selected endpoints. This separates endpoint usability from
+delivery that could succeed through retries on the other hopping frequency. These are separate checks: a passing
+hopping workload does not imply continuous fixed-frequency duplex capability.
+In particular, 2FSK and GMSK at 1415.5 MHz with 1024-byte payloads passed each
+one-way phase but failed simultaneous traffic, despite their 415.5/1415.5 MHz
+hopping workloads passing. GMSK also reported a TX underflow/transmit error
+in that fixed-frequency simultaneous phase. The results describe this full hardware/software/gain setup;
+they are not an absolute B205 tuning limit, a sustained qualification, or a
+promise of operation on every frequency between the tested centers.
+
+The compact operating-point tables are in `MODULATION_RESULTS.md`. The normal
+GUI limits and the X310 configuration remain unchanged.
+
+
+### X310 pre-merge smoke test — 2026-11-12
+
+X310 serial `3267DE0` at `192.168.10.2` passed the short shared-channel
+regression check after the two-computer B205 changes. The existing crossed,
+30 dB attenuated channel paths used simple-frame 2FSK at 915 MHz and
+250 kbit/s. `tools/simple_link_check.py --shared-device` with the two
+`peer-*-x310-simple.yaml` profiles, `--count 20 --interval 0.2`, delivered
+25/25 exact packets in each direction, including 1-, 64- and 1024-byte
+payload boundaries and repeated payloads. Submitted waveform sizes matched,
+stream error deltas were zero, and device close/reopen completed cleanly.
+
+A headless Textual smoke check exercised the actual GUI and UHD hardware,
+without mocked discovery or radio controls. Automatic discovery selected the
+X310; Save and Start created one owned process for channels 0 and 1, both
+status endpoints became live, and simultaneous local UDP injection delivered
+10/10 exact RF payloads to each receiver. All monitored traffic-phase error
+deltas were zero. GUI Stop released the device. UHD emitted its socket-buffer
+size warning, but no corresponding errors occurred in these workloads.
+
+This verifies the short fixed-frequency startup/data/shutdown path; it does
+not replace the existing modulation or hopping qualifications. The software
+suite immediately before this hardware check passed all 2182 tests.

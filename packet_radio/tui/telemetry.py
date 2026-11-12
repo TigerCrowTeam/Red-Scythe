@@ -137,3 +137,25 @@ def render_monitor(controller):
     if controller.monitor is None:
         return "Live status unavailable until the owned radio completes startup."
     return "\n\n".join(render_node(node) for node in controller.monitor.nodes)
+
+
+def connection_summary(controller):
+    """Separate owned process readiness from fresh, receive-only evidence of a peer."""
+    if not controller.active:
+        return "Local radio: stopped · Remote peer: not monitored"
+    monitor = controller.monitor
+    if monitor is None or not monitor.nodes or monitor.nodes[0].state != "Live":
+        return f"Local process: {controller.state} · RF readiness / remote peer: unknown (no live status)"
+    node = monitor.nodes[0]
+    snapshot = node.snapshot
+    local = "ready" if snapshot.get("radio_ready") else "not ready"
+    peer = (
+        "recent RF packets received"
+        if snapshot.get("peer_active")
+        else "no recent RF packets (peer may be idle)"
+    )
+    profile = snapshot.get("configuration", {}).get("emulation") or {}
+    sync = ""
+    if profile.get("frequency", {}).get("synchronization") == "rf-leader":
+        sync = " · RF sync: " + ("acquired" if snapshot.get("synchronized") else "waiting")
+    return f"Local radio: {local} · Remote peer: {peer}{sync}"

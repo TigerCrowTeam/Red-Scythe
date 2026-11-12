@@ -15,9 +15,19 @@ def main():
         action="store_true",
         help="explicitly convert a schema-1 source to a new draft; original stays read-only",
     )
+    parser.add_argument(
+        "--offline", action="store_true", help="skip automatic SDR discovery for a new project"
+    )
+    parser.add_argument(
+        "--node-role",
+        choices=("a", "b"),
+        help="this computer's role for a new B205 setup; choose the other role on the other computer",
+    )
     args = parser.parse_args()
     if args.import_legacy and not args.config:
         parser.error("--import-legacy requires a source config")
+    if args.node_role and (args.config or args.offline):
+        parser.error("--node-role applies only to a new automatically detected setup")
     try:
         from packet_radio.tui.app import RadioEditor
     except ModuleNotFoundError as exc:
@@ -41,7 +51,9 @@ def main():
         )
     except (OSError, ValueError) as exc:
         parser.exit(1, f"Cannot open radio project: {exc}\n")
-    RadioEditor(session).run()
+    RadioEditor(
+        session, auto_detect=not args.config and not args.offline, node_role=args.node_role
+    ).run()
 
 
 if __name__ == "__main__":

@@ -6,7 +6,9 @@ MSK and GMSK are the release-focus modulations; QPSK is retained and tested.
 
 The reference setup is one X310 with two UBX-160 channels on one workstation,
 connected through crossed, attenuated cables. B205mini radios remain supported,
-but independent-computer qualification remains deferred. Configurable settings
+with two-computer fixed-frequency checks completed for all five modulations,
+including simultaneous traffic. An explicit generic-v5 RF synchronization mode
+adds independent-clock B205 hopping; see the measured scope in [UHD setup](docs/UHD_SETUP.md#rf-synchronized-b205-hopping). Configurable settings
 are not performance guarantees: see the [calculated hop/payload tables](MODULATION_RESULTS.md)
 and [supported settings](docs/CONFIGURATION.md).
 
@@ -40,6 +42,56 @@ when updating an older `telemetry-radio` installation.
 - [Current packet protocol](docs/PROTOCOL.md)
 - [Program guide](docs/PROGRAM_GUIDE.md) — what the radio does, its architecture, data flow and runtime behavior.
 - [Terminal GUI guide](docs/TERMINAL_GUI_GUIDE.md) — editable fields, choices, units and limits for radio setup and packet building.
+
+## Automatic SDR setup
+
+Run `packet-radio-ui` for a new project. It discovers local UHD devices without
+starting streams. One B205 selects a single node on this computer; one X310
+selects the shared two-channel simple-frame setup. Multiple supported SDRs require
+an explicit selection. No SDR found leaves the offline editor available.
+
+For two computers, install the same program and matching UHD bindings on each,
+attach one B205 to each computer, and choose different roles:
+
+```bash
+# Computer A
+packet-radio-ui --node-role a
+# Computer B
+packet-radio-ui --node-role b
+```
+
+For the crossed 30 dB attenuated B205 bench, set TX gain to `20 dB` and RX gain
+to `40 dB` on each GUI draft before saving. New drafts start at 0 dB.
+Save each local project and use Start. The initial setup is bidirectional 2FSK,
+915 MHz, 250 kbit/s, with simple frames and a fixed frequency. Keep the waveform
+and packet settings matched on both computers. UDP endpoints stay on localhost;
+the computers exchange packet data through their SDRs, not a LAN connection.
+The automatic simple-frame setup stays fixed-frequency. For RF-synchronized
+hopping, use the separate authenticated generic-v5 B205 profiles described in
+[UHD setup](docs/UHD_SETUP.md#rf-synchronized-b205-hopping).
+
+Use `--offline` to skip startup discovery, or Ctrl+D to detect a new setup from
+the editor. Opening a saved project preserves its hardware and radio settings.
+For headless operation, `packet-radio --config NODE.yaml --auto-device` selects
+the local SDR; `--sdr-serial SERIAL` resolves multiple devices. Explicit
+`--config NODE_A --peer-config NODE_B` X310 operation remains supported.
+See [two-computer setup and the first packet check](docs/UHD_SETUP.md#two-computers-with-one-b205-each).
+
+## Save a two-computer project
+
+In the GUI, choose **Setup** (Ctrl+G). Select **B205 — remote radio peer**, enter
+this SDR's serial, choose Computer A or B, and select a gain preset. The B205
+conducted bench preset applies TX 20 dB / RX 40 dB for the crossed 30 dB attenuated
+setup. **Keep current gains** preserves custom values. Apply edits the draft;
+Save and Start are separate actions. The X310 mode retains its local channel pair.
+
+Choose **Export project** (Ctrl+E), enter a new folder and the other B205's serial.
+The folder contains `computer-a.yaml`, `computer-b.yaml` and one shared
+`profiles/` file. Copy the whole folder to the other computer. Open the matching
+node on each host, then Start. Hardware settings can be edited separately; after
+changing shared waveform/framing settings, export and distribute a new pair.
+Local process readiness and recent RF peer activity are shown separately. SSH is
+optional for administration; neither Ethernet nor SSH is required for radio data.
 
 ## Repository layout
 

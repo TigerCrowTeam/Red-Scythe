@@ -1,0 +1,43 @@
+profile_version: 1
+id: generic-2fsk-b205-rf-hopping-v5
+revision: 1
+reference: 'docs/UHD_SETUP.md: RF leader hopping'
+qualification: unqualified
+limitations:
+- B205 independent-radio RF synchronization; hardware qualification is specific to
+  the tested workload.
+- Project-defined generic-v5 SYNC extension; both peers must use the same resolved
+  profile.
+waveform:
+  modulation: 2fsk
+  frequency_deviation_hz: 125000
+  bit_rate_bps: 250000
+  sample_rate_hz: 2000000
+  bandwidth_hz: 1000000
+frequency:
+  mode: hopping
+  frequencies_hz:
+  - 915000000
+  - 916000000
+  dwell_seconds: 1.0
+  guard_seconds: 0.1
+  epoch: 0
+  synchronization: rf-leader
+  sequence_mode: cycle
+  repeated_frequencies: reject
+packet:
+  format: generic-v5
+  max_payload_bytes: 1024
+protection:
+  scheme: extended-hamming-8-4
+  interleaver_depth: 16
+  bit_repetitions: 1
+  rs_parity_bytes: 0
+link:
+  mode: reliable
+  ack_timeout_seconds: 0.25
+  max_retries: 8
+  tdd_period_seconds: 0
+  tdd_guard_seconds: 0
+  hardware_clock_sync: true
+  hardware_slot_scheduling: false

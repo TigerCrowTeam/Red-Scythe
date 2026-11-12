@@ -32,9 +32,12 @@ def hop_transmit_target(app: RadioApp, sample_count: int, slot: int) -> int | No
     submit an immutable target. Backend preparation may reject a late target,
     but cannot move it later across the trailing guard.
     """
-    before = app.wall_clock()
+    from packet_radio.protocol.rf_hopping import enabled
+
+    clock = app.scheduler.clock if enabled(app.config) else app.wall_clock
+    before = clock()
     device_now = app.sdr.hardware_time()
-    after = app.wall_clock()
+    after = clock()
     lead = app.config.link.hardware_timed_tx_lead_seconds
     earliest, latest = before + lead, after + lead
     first, last = app.scheduler.state(earliest), app.scheduler.state(latest)

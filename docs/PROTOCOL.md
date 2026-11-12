@@ -37,6 +37,15 @@ SYNC carries an 8-byte network-order IEEE-754 double containing leader time in
 seconds, optionally followed by an 8-byte hardware transmit timestamp in
 nanoseconds. Only the configured timing leader may synchronize the follower.
 
+The explicit generic-v5 B205 `rf-leader` hopping profile uses a 32-byte SYNC:
+the double and uint64 timestamp above, followed by the first 16 bytes of the
+SHA-256 resolved profile fingerprint. Both peers must support this extension and
+use identical profiles. Ordinary DATA, ACK and fixed-frequency SYNC are unchanged.
+Signature, identity and replay validation precede clock acquisition. The follower
+checks the receive timestamp’s local age and subsequent beacon progression; it
+does not require matching host wall clocks. Profile mismatches cannot acquire
+the hopping schedule.
+
 New packet sequences are assigned on first transmission, not input admission, so
 queue overflow and a large backlog do not advance synchronization packets beyond
 the replay window of unsent data. Retransmissions retain identity and bytes;

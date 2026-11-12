@@ -1220,3 +1220,28 @@ exact `sample_count`, and reset acquisition on a hop. Future modulations still
 need framing, streaming/reset, capacity and hardware qualification tests; registry
 membership alone does not establish a safe hop rate. The 29 hops/s product cap
 is a ceiling, not a qualification claim for every waveform and host.
+
+## Independent B205 RF hopping
+
+The explicit generic-v5 frequency contract also accepts
+`synchronization: rf-leader`. See the paired
+`configs/v1_1/peer-*-b205-rf-hopping.yaml` examples. This mode requires B205
+channel 0, epoch 0, timed I/O and `link.hardware_clock_sync: true`, with TDD and
+hardware slot scheduling disabled. Current B205 limits remain at most 1 hop/s
+and guards of at least 100 ms. Both nodes need identical resolved profiles;
+the SYNC extension checks the profile fingerprint before clock acquisition.
+
+The follower maps its local hardware clock to the leader using RF SYNC transmit
+and receive timestamps. It starts and reacquires on the first table frequency,
+with TX blocked until synchronization is acquired. Missing accepted beacons for
+`frequency.sync_loss_seconds` (default 15 seconds) triggers loss and reacquisition;
+DATA/ACK activity cannot extend that clock freshness. Authentication and replay
+checks are retained. Receive age is checked in the local hardware clock domain;
+authentication freshness tolerances constrain subsequent beacon progression
+without assuming shared host UTC. This supplies timing synchronization, not RF
+phase coherence or profile negotiation.
+
+The simple-frame `external-utc` contract described above is unchanged. Its
+separate-host clock discipline is still the operator's responsibility, and the
+automatic B205 setup rejects that combination. RF synchronization does not raise
+B205 tuning-rate limits or imply the X310's DSP hopping performance.

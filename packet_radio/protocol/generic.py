@@ -33,8 +33,10 @@ class GenericV5Behavior:
         return app.config.endpoint.max_payload_bytes
 
     def initialize(self, app: RadioApp) -> None:
+        from packet_radio.protocol.rf_hopping import RFHopSync, enabled
         from packet_radio.transmission import new_session_id
 
+        self.rf_sync = RFHopSync(app.config) if enabled(app.config) else None
         app.session_id = new_session_id() or 1
         app.replay_protector = ReplayProtector(
             app.config.authentication.replay_window,
@@ -126,6 +128,9 @@ class GenericV5Behavior:
                     app.last_rx = app.monotonic_clock()
                 continue
             if packet.kind == PacketKind.SYNC:
+                if self.rf_sync is not None:
+                    self.rf_sync.receive(app, packet.payload, arrival_time_ns)
+                    continue
                 if (
                     app.config.timing_role == "follower"
                     and packet.source == app.config.peer_id
@@ -230,6 +235,8 @@ class GenericV5Behavior:
             payload = struct.pack("!d", sync_time)
             if app.config.link.hardware_clock_sync and target_ns is not None:
                 payload += struct.pack("!Q", target_ns)
+                if self.rf_sync is not None:
+                    payload += self.rf_sync.fingerprint
             queued.packet = RadioPacket(
                 queued.packet.source,
                 queued.packet.destination,
@@ -258,7 +265,7 @@ class GenericV5Behavior:
         return clear
 
     def transmit_allowed(self, app: RadioApp) -> bool:
-        return not app.recovering
+        return not app.recovering and (self.rf_sync is None or self.rf_sync.fresh(app))
 
     def transmit_failed(self, app: RadioApp, queued: QueuedPacket) -> None:
         link = cast(ReliableLink, app.link)
@@ -267,11 +274,36 @@ class GenericV5Behavior:
 
     def tick(self, app: RadioApp) -> None:
         now = app.monotonic_clock()
-        if app.config.timing_role == "leader" and now >= app.next_sync_at:
-            app._queue(struct.pack("!d", app.wall_clock()), BROADCAST_ID, kind=PacketKind.SYNC)
-            app.next_sync_at = now + 2.0
+        rendezvous_due = (
+            self.rf_sync is not None
+            and app.current_frequency == app.config.frequency.frequencies_hz[0]
+            and now >= self.rf_sync.next_rendezvous_at
+        )
+        if app.config.timing_role == "leader" and (now >= app.next_sync_at or rendezvous_due):
+            payload = struct.pack("!d", app.wall_clock())
+            if self.rf_sync is not None:
+                payload = bytes(16) + self.rf_sync.fingerprint
+                # At most one queued beacon; never fill the control queue while guarded.
+                if any(
+                    q.packet.kind == PacketKind.SYNC
+                    for q in cast(ReliableLink, app.link).control_queue
+                ):
+                    return
+            app._queue(payload, BROADCAST_ID, kind=PacketKind.SYNC)
+            # Bound control traffic independently of hop rate. A separate first-channel
+            # opportunity prevents the periodic timer from aliasing onto another channel
+            # forever while an unsynchronized follower waits at the rendezvous frequency.
+            app.next_sync_at = now + (0.5 if self.rf_sync is not None else 2.0)
+            if (
+                self.rf_sync is not None
+                and app.current_frequency == app.config.frequency.frequencies_hz[0]
+            ):
+                self.rf_sync.next_rendezvous_at = now + 0.5
 
     def recover(self, app: RadioApp) -> None:
+        if self.rf_sync is not None:
+            self.rf_sync.recover(app)
+            return
         if app.config.timing_role == "leader":
             return
         now = app.monotonic_clock()

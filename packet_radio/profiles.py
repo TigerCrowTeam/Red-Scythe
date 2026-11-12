@@ -172,8 +172,10 @@ def normalize_frequency(raw, *, automatic_payload=False) -> dict:
             raise ValueError("host hopping requires dwell >= 0.5 s and guard >= 0.1 s")
         if 2 * result["guard_seconds"] >= result["dwell_seconds"]:
             raise ValueError("hop guards must leave a usable dwell")
-        if result["synchronization"] != "external-utc":
-            raise ValueError("hopping requires externally synchronized UTC clocks")
+        if result["synchronization"] not in ("external-utc", "rf-leader"):
+            raise ValueError("hopping synchronization must be external-utc or rf-leader")
+        if result["synchronization"] == "rf-leader" and result["epoch"] != 0:
+            raise ValueError("RF leader hopping uses epoch 0 in the leader hardware clock domain")
         if result["sequence_mode"] not in ("cycle", "ping_pong"):
             raise ValueError("unsupported hop sequence")
         if result["repeated_frequencies"] != "reject":
@@ -324,8 +326,20 @@ def normalize_definition(raw) -> dict:
             raise ValueError("generic-v5 requires extended-hamming-8-4")
     else:
         raise ValueError("unsupported packet format")
-    if freq["mode"] == "hopping" and packet["format"] != "simple-frame-v1":
-        raise ValueError("schema-2 hopping currently requires simple-frame-v1")
+    if freq["mode"] == "hopping":
+        if freq["synchronization"] == "rf-leader":
+            if packet["format"] != "generic-v5":
+                raise ValueError("RF leader hopping requires generic-v5 control frames")
+            if (
+                not link.get("hardware_clock_sync")
+                or link.get("tdd_period_seconds")
+                or link.get("hardware_slot_scheduling")
+            ):
+                raise ValueError(
+                    "RF leader hopping requires hardware clock sync without TDD/slot scheduling"
+                )
+        elif packet["format"] != "simple-frame-v1":
+            raise ValueError("external-utc hopping requires simple-frame-v1")
     return {
         **{k: copy.deepcopy(raw[k]) for k in META},
         "waveform": wf,

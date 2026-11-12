@@ -267,6 +267,8 @@ def test_compact_values_restore_controls_when_choices_become_available():
 
     async def exercise():
         app = RadioEditor()
+        # Generic X310 remains fixed-only; generic B205 now offers RF-synchronized hopping.
+        app.session.change("node.hardware.device.type", "x300")
         async with app.run_test(size=(80, 24)) as pilot:
             await settle(pilot)
             control(app, "profile.waveform.modulation").value = "bpsk"
