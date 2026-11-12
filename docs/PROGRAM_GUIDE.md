@@ -1,14 +1,15 @@
-# Packet Radio Program Guide
+# Radio Emulator 1.3 — Program Guide
 
-This guide explains what Packet Radio does, how data moves through the program,
+This guide explains what Radio Emulator does, how data moves through the program,
 and how its configuration, radio links, authentication and runtime components work.
 For explanations of the editable GUI fields, use the separate
 [Terminal GUI Guide](TERMINAL_GUI_GUIDE.md).
 
 ## Current scope
 
-Release **1.1.0** supports both reliable generic-v5 and ACK-free simple frames on all five modulations.
-Use the [1.1 migration and profile table](CONFIGURATION.md#upgrading-from-100-to-110)
+Release **1.3** (Python package **1.3.0**) supports both reliable generic-v5 and ACK-free simple frames on all five modulations.
+Use the [1.3 upgrade notes](CONFIGURATION.md#upgrading-to-radio-emulator-13) and
+[profile table](CONFIGURATION.md#upgrading-from-100-to-110)
 for node examples, operating modes, rates and the qualified hopping schedule.
 The generic link behavior below applies only when generic-v5 is selected.
 
@@ -20,8 +21,10 @@ The generic core, direct UHD backend and shared configuration interfaces are
 implemented. The shared-channel X310 is the reference for the documented conducted
 setup. Two B205s on separate computers have also passed fixed-frequency tests
 on all five modulations, including simultaneous traffic. Performance remains
-workload-specific. See the calculated [hop/payload tables](../MODULATION_RESULTS.md)
-and [UHD setup](UHD_SETUP.md).
+workload-specific. B205 RF-synchronized hopping has also been measured on all
+five modulations. See the [measured results and calculated payload tables](../MODULATION_RESULTS.md)
+and [UHD setup](UHD_SETUP.md); benchmark overrides do not raise the normal GUI
+limits, and QPSK's larger-packet tests still reported receive overflows.
 
 ## Automatic hardware selection
 
@@ -339,7 +342,7 @@ in `CONFIGURATION.md`; `tools/hopping_check.py` exercises the conducted paths.
 
 
 Automatic payload sizing can prioritize hop speed over packet capacity in the
-variable-length 2FSK hopping mode. The radio calculates how many payload bytes fit
+variable-length simple-frame X310 hopping mode on all five modulations. The radio calculates how many payload bytes fit
 within each dwell, up to the user's ceiling, and displays that effective limit.
 It accounts for framing/protection and timing reserves; it does not truncate or
 fragment messages. Both peers must use matching settings. See the terminal GUI

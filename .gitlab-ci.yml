@@ -70,13 +70,13 @@ package:
   script:
     - python -m build
     - twine check dist/*
-    - python -m pip install --force-reinstall --no-deps dist/packet_radio-1.1.0-py3-none-any.whl
+    - python -m pip install --force-reinstall --no-deps dist/packet_radio-1.3.0-py3-none-any.whl
     - python -m venv /tmp/packet-radio-release
-    - /tmp/packet-radio-release/bin/python -m pip install --force-reinstall dist/packet_radio-1.1.0-py3-none-any.whl
-    - cp dist/packet_radio-1.1.0-py3-none-any.whl /tmp/packet_radio-1.1.0-py3-none-any.whl
+    - /tmp/packet-radio-release/bin/python -m pip install --force-reinstall dist/packet_radio-1.3.0-py3-none-any.whl
+    - cp dist/packet_radio-1.3.0-py3-none-any.whl /tmp/packet_radio-1.3.0-py3-none-any.whl
     - cd /tmp
     - /tmp/packet-radio-release/bin/python /tmp/packet-radio-release/share/packet-radio/tools/check_install.py
-    - /tmp/packet-radio-release/bin/python -m pip install "/tmp/packet_radio-1.1.0-py3-none-any.whl[ui]"
+    - /tmp/packet-radio-release/bin/python -m pip install "/tmp/packet_radio-1.3.0-py3-none-any.whl[ui]"
     - /tmp/packet-radio-release/bin/python /tmp/packet-radio-release/share/packet-radio/tools/check_ui_install.py
   artifacts:
     paths:

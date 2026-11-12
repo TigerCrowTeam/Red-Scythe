@@ -1,4 +1,4 @@
-# Terminal GUI: Editable Fields
+# Radio Emulator 1.3 — Terminal GUI Fields
 
 This guide explains the boxes, lists and checkboxes you can change in the GUI.
 Fields are grouped by the section names shown on screen. Each explanation tells
@@ -28,10 +28,12 @@ For B205 projects, Start launches only this computer's node. For simple-frame
 X310 projects, Start generates the other local channel automatically. Start pair
 still accepts two saved X310 nodes for explicit peer settings. Both B205 hosts
 must use matching radio/packet settings; their UDP endpoints remain local.
-For the tested B205 setup with a 30 dB attenuator in each crossed coax path,
-enter `20 dB` for **TX gain** and `40 dB` for **RX gain** on both computers.
-New auto-detected drafts start at 0 dB; these bench gains must be entered or
-loaded from the `peer-a-b205-two-host.yaml` / `peer-b-b205-two-host.yaml` examples.
+New auto-detected drafts start at 0 dB. The fixed-frequency B205 examples and
+bench preset use **TX gain** `20 dB` / **RX gain** `40 dB` from the earlier tests.
+The later RF-hopping setup used TX `30 dB` on dev5 and `60 dB` on dev10, with
+RX `40 dB` on both and a 30 dB attenuator in each crossed coax path. Enter those
+values explicitly when reproducing that setup; the preset does not apply them.
+See [the measured setup](UHD_SETUP.md#b205-timing-experiments).
 
 ## Operating setup inputs
 

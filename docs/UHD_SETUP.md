@@ -1,4 +1,4 @@
-# Direct UHD setup and bench checks
+# Radio Emulator 1.3 — UHD Setup and Bench Checks
 
 The hardware backend uses Ettus `uhd.usrp.MultiUSRP` directly. The current conducted
 reference is one X310 with two shared UBX-160 channels on one workstation. B205mini
@@ -21,7 +21,8 @@ sudo apt install uhd-host python3-uhd python3-venv
 /usr/bin/python3 -c 'import uhd; print(uhd.__file__)'
 /usr/bin/python3 -m venv --system-site-packages .venv-uhd
 source .venv-uhd/bin/activate
-python -m pip install /path/to/packet_radio-1.1.0-py3-none-any.whl
+cd /tmp  # Install outside the source checkout.
+python -m pip install /path/to/packet_radio-1.3.0-py3-none-any.whl
 packet-radio-conformance
 mkdir -p ~/packet-radio-work
 cp -r "$VIRTUAL_ENV/share/packet-radio/configs" ~/packet-radio-work/
@@ -33,7 +34,7 @@ For the terminal editor, install the same wheel with its optional UI extra in
 this interpreter-matched environment:
 
 ```bash
-python -m pip install "/path/to/packet_radio-1.1.0-py3-none-any.whl[ui]"
+python -m pip install "/path/to/packet_radio-1.3.0-py3-none-any.whl[ui]"
 packet-radio-ui
 ```
 
@@ -262,9 +263,11 @@ packet-radio-ui --node-role b
 ```
 
 Discovery binds the local B205 serial and channel 0. Save a local node on each
-computer. For the crossed 30 dB attenuated B205 bench, set TX gain to `20 dB`
-and RX gain to `40 dB` on both nodes before saving; new GUI drafts still start
-at 0 dB. Check hardware, then Start on both. A missing or unsupported SDR
+computer. New GUI drafts start at 0 dB. The fixed-frequency examples and bench
+preset use TX `20 dB` / RX `40 dB` from the earlier conducted tests. The later
+RF-hopping setup uses per-host TX gains of 30/60 dB and RX 40 dB; see
+[B205 timing experiments](#b205-timing-experiments) before reproducing those
+measurements. Check hardware, then Start on both. A missing or unsupported SDR
 leaves the editor usable; Ctrl+D retries detection. If several radios are found,
 select the intended device. Opening an existing node preserves its saved selector.
 

@@ -1,8 +1,8 @@
 # Generic Packet Protocol 5
 
-`generic-v5` is the reliable packet format retained in release 1.1.0. Configuration
+`generic-v5` is the reliable packet format retained in Radio Emulator 1.3. Configuration
 schema 1 and capture format 2 do not change these on-air bytes.
-The version 1.1 [simple 2FSK format](EMULATION_PROFILE.md) is a separate contract
+The [simple 2FSK format](EMULATION_PROFILE.md) is a separate contract
 with an implemented codec, sample pipeline and ACK-free live modes. It is selected
 through [schema-2 profiles](CONFIGURATION.md#version-11-reusable-profiles-schema-2)
 or the retained Python API. Schema-1 YAML stays generic-v5 only. Capture format 3

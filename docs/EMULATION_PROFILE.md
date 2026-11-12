@@ -4,10 +4,11 @@ Contract revision: **1**, frozen for version 1.1.
 Profile identifier: **`simple-2fsk-v1`**.
 Packet/burst format identifier: **`simple-frame-v1`**.
 
-Status in release 1.1.0: the codec/sample pipeline, ACK-free live modes, reusable
+Status in Radio Emulator 1.3: the codec/sample pipeline, ACK-free live modes, reusable
 schema-2 YAML selection and resolved capture/replay are implemented. Short conducted
-integration and independent fidelity checks pass; sustained fixed-profile RF
-qualification remains pending. Schema-1 configuration still rejects these identifiers. This is a project-defined reference radio, not a commercial
+integration and independent fidelity checks pass. Conducted fixed-frequency and
+hopping results are recorded by hardware and workload in [UHD setup](UHD_SETUP.md)
+and [modulation results](../MODULATION_RESULTS.md). Schema-1 configuration still rejects these identifiers. This is a project-defined reference radio, not a commercial
 radio protocol.
 Its acceptance level is **behavior emulation between our two SDRs**.
 
@@ -50,8 +51,10 @@ waveform lengths below remain unchanged. Rectangular burst edges are intentional
 spectral-mask compliance is claimed.
 
 The hardware test path uses B205mini serials 3457464 and 3457480 with the confirmed
-crossed TX/RX → 30 dB attenuation → RX2 paths. Start qualification from the measured
-2 Msps, 1 MHz bandwidth, TX 20 dB / RX 40 dB bench settings. Device serials, gains
+crossed TX/RX → 30 dB attenuation → RX2 paths. The earlier simple-frame
+checks used 2 Msps, 1 MHz bandwidth and TX 20 dB / RX 40 dB. Later authenticated
+RF-hopping tests use different per-host gains; see UHD_SETUP.md before reproducing
+a specific workload. Device serials, gains
 and local UDP ports are host settings, not bytes in the emulated protocol.
 
 ## Exact transmitted layout
@@ -210,14 +213,14 @@ capacity is not proof of delivery or interoperability.
 |---|---|---|
 | Direct UHD and 2FSK waveform primitive | Implemented | Existing generic-v5 code and conducted measurements |
 | This frame layout | Implemented | `protocol/simple.py`; explicit `SimpleProfile` application selection |
-| ACK-free live link mode | Implemented; short conducted checks passed | Live modes and schema-2/capture-3 selection; sustained qualification pending |
+| ACK-free live link mode | Implemented; short conducted checks passed | Live modes and schema-2/capture-3 selection; hardware/workload qualification in UHD_SETUP.md |
 | Approximation of another radio | None claimed | This is a project-defined reference profile |
 | Named target and specification revision | Unknown / not selected | Record both before target-specific compatibility work |
 | Target packet/timing/whitening/security behavior | Unknown | Do not substitute generic-v5 behavior for missing information |
 | Hopping | Separate schema-2 simple-2fsk-hopping-v1 profile | See CONFIGURATION.md for its timing contract and separate conducted workload |
 | Non-integral sample/bit-rate ratios | Explicitly deferred | Reference rates are integral; a target requiring resampling must reopen this work |
 | Actual-target interoperability | Unverified | Requires independent target equipment/reference and separate tests |
-| Two-computer physical qualification | Deferred | Initial acceptance uses one workstation and two SDRs |
+| Two-computer physical qualification | Conducted B205 workloads tested | Fixed-frequency and RF-hopping measurements in UHD_SETUP.md; qualification remains specific to settings and workload |
 
 To add a target, record its model/revision, specification or capture provenance,
 exact implemented subset, known approximations, and numerical waveform/timing

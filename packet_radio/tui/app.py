@@ -18,6 +18,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import Button, Checkbox, Footer, Header, Input, Select, Static
 
+from packet_radio import __version__
 from packet_radio.configuration.catalog import FIELDS, available_choices, visible_fields
 from packet_radio.configuration.draft import RadioDraft
 from packet_radio.configuration.forms import FormSession, format_value, lookup, parse_value
@@ -43,7 +44,7 @@ from packet_radio.tui.widgets import Entries, FieldRow, field_id
 
 
 class RadioEditor(App):
-    TITLE = "Packet Radio · Configuration"
+    TITLE = f"Radio Emulator {__version__.removesuffix('.0')} · Configuration"
     COMMAND_PALETTE_BINDING = "ctrl+shift+p"
     BINDINGS = [
         ("ctrl+q", "request_quit", "Quit"),

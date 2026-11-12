@@ -1,4 +1,4 @@
-# Configuration reference
+# Radio Emulator 1.3 — Configuration Reference
 
 Both schema 1 and reusable schema-2 node/profile configurations are supported.
 The terminal editor saves schema 2; the sections below retain the schema-1
@@ -12,18 +12,18 @@ the fields you can type in or select, their units and their limits. No SDR is ne
 
 | Modulation | Waveform controls specific to the selection | Packet formats |
 |---|---|---|
-| BPSK | Pulse shaping; RRC rolloff/span when RRC is selected | generic-v5 |
+| BPSK | Pulse shaping; RRC rolloff/span when RRC is selected | generic-v5 or simple-frame-v1 |
 | 2FSK | Frequency deviation | generic-v5 or simple-frame-v1 |
-| MSK | Deviation derived from bit rate | generic-v5 |
-| GMSK | Gaussian BT and span; deviation derived from bit rate | generic-v5 |
-| QPSK | Pulse shaping; RRC rolloff/span when RRC is selected | generic-v5 |
+| MSK | Deviation derived from bit rate | generic-v5 or simple-frame-v1 |
+| GMSK | Gaussian BT and span; deviation derived from bit rate | generic-v5 or simple-frame-v1 |
+| QPSK | Pulse shaping; RRC rolloff/span when RRC is selected | generic-v5 or simple-frame-v1 |
 
 All expose center frequency, bit rate and applicable hardware settings. F2 reveals
 advanced controls; derived or unsupported fields remain read-only or absent.
 Changing modulation rebuilds its applicable controls and removes incompatible
 waveform settings. This does not add new backend capabilities.
 
-Generic-v5 has fixed framing. Simple 2FSK exposes preamble/sync, fixed or variable
+Generic-v5 has fixed framing. Simple frames on all five modulations expose preamble/sync, fixed or variable
 payload length, byte order, CRC selection and supported protection options. Fixed
 length hides variable-length fields; no CRC hides CRC byte order; disabled FEC
 hides its dependent controls. Hopping replaces the fixed center-frequency field
@@ -996,18 +996,43 @@ The generic conducted checker retains its own reliable-mode recovery path. Neith
 script treats successful local submission as proof of RF delivery.
 
 
+## Upgrading to Radio Emulator 1.3
+
+The product is **Radio Emulator 1.3**; the Python distribution version is
+**1.3.0**. Distribution/command names remain `packet-radio` and imports remain
+`packet_radio`. Install `packet_radio-1.3.0-py3-none-any.whl`, adding `[ui]` for
+the terminal interface, in each host's UHD-compatible Python environment.
+Run wheel installation from outside the source checkout.
+Stop existing processes before upgrading and preserve your saved nodes, keys,
+replay state and recordings. Both computers should run the same release.
+
+Existing schema-1/schema-2 configurations, protocol-v5 DATA/ACK packets, simple
+frames and legacy captures remain supported. The `configs/v1_1/` directory and
+version-1 profile identifiers retain their names for compatibility. The separate
+B205 `rf-leader` hopping profile adds fingerprinted SYNC frames and requires both
+peers to use matching profiles and software supporting that extension. It does
+not change existing fixed-frequency or X310 simple-frame wire formats.
+
+New GUI sessions detect B205 or X310 hardware. B205 uses one local node; the
+simple-frame X310 Start action creates the other local channel. Export project
+supports fixed-frequency simple-frame B205 pairs. Authenticated RF-hopping nodes
+need explicit key paths and separate private identities. The normal B205 limit
+remains 1 hop/s; higher measured rates are benchmark-only overrides. See
+[UHD setup](UHD_SETUP.md) for gains, measured operating points and remaining
+limitations. Existing customized projects are not automatically rewritten.
+
 ## Upgrading from 1.0.0 to 1.1.0
 
-The distribution remains `packet-radio`, imports remain `packet_radio`, and all
-seven console commands retain their names. Install `packet_radio-1.1.0-py3-none-any.whl`
-in a fresh UHD-compatible environment. Stop the old processes first, preserve
-keys and replay state, and copy the bundled `configs` tree into writable storage.
-Do not overwrite customized node files with examples.
+The following compatibility notes describe the schema-2 changes introduced in
+1.1 and still supported by 1.3. Use the [current upgrade instructions](#upgrading-to-radio-emulator-13)
+for installation. The distribution remains `packet-radio` and imports remain
+`packet_radio`. Preserve keys and replay state and copy the bundled `configs`
+tree into writable storage. Do not overwrite customized node files with examples.
 
 Existing schema-1 configurations and generic-v5 wire bytes remain compatible;
 no conversion or key rotation is required. Legacy capture formats 1 and 2 remain
 readable. Capture format 3 includes the resolved profile so replay does not depend
-on the original YAML. Recordings made by 1.1 should be replayed with 1.1.
+on the original YAML. Recordings made by 1.1 remain readable in 1.3.
 
 For new profiles, keep the relative `configs/v1_1` and `configs/profiles` layout.
 Choose a matching pair below, set each `hardware.device.serial` and appropriate

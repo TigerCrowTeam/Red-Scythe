@@ -1,39 +1,46 @@
-# General-Purpose SDR Packet Radio
+# Radio Emulator 1.3
 
-Packet Radio 1.1.0 carries arbitrary binary packets between two radio endpoints using Ettus UHD.
-Applications submit and receive packets through local UDP sockets. BPSK, 2FSK,
-MSK and GMSK are the release-focus modulations; QPSK is retained and tested.
+Radio Emulator 1.3 carries arbitrary binary packets between configurable SDR
+endpoints using Ettus UHD. Applications submit and receive packets through local
+UDP sockets. BPSK, 2FSK, MSK, GMSK and QPSK support configurable waveforms and
+packet framing. The Python package release is **1.3.0**.
 
-The reference setup is one X310 with two UBX-160 channels on one workstation,
-connected through crossed, attenuated cables. B205mini radios remain supported,
-with two-computer fixed-frequency checks completed for all five modulations,
-including simultaneous traffic. An explicit generic-v5 RF synchronization mode
-adds independent-clock B205 hopping; see the measured scope in [UHD setup](docs/UHD_SETUP.md#rf-synchronized-b205-hopping). Configurable settings
-are not performance guarantees: see the [calculated hop/payload tables](MODULATION_RESULTS.md)
-and [supported settings](docs/CONFIGURATION.md).
+The same program supports two hardware arrangements:
 
-**Version 1.1.0** supports configurable radio emulation. The
-[2FSK reference contract](docs/EMULATION_PROFILE.md) defines the baseline wire format, and the
-[configurable framing API](docs/CONFIGURATION.md#version-11-configurable-framing-api)
-is implemented. The [live Python API](docs/CONFIGURATION.md#version-11-live-simple-link-modes)
-adds transmit-only, receive-only and bidirectional simple-frame operation without
-ACKs or beacons. [Schema-2 YAML profiles](docs/CONFIGURATION.md#version-11-reusable-profiles-schema-2)
-now select either format without source changes and retain resolved settings in
-capture/replay. Start from the paired [node examples](configs/v1_1/peer-a-simple.yaml)
-and [reusable definition](configs/profiles/simple-2fsk-v1.yaml). Schema 1 and legacy
-captures remain supported. The [hopping profile](configs/profiles/simple-2fsk-hopping-v1.yaml)
-adds a deterministic UTC schedule to simple frames. All five current modulations
-can use simple-frame hopping and automatic payload sizing. See
-[payload tables](MODULATION_RESULTS.md) for calculated per-hop capacity, not proof of delivery. The separate
-[X310 hopping profile](configs/profiles/simple-2fsk-x310-hopping-v1.yaml) selects
-2 hops/s on the qualified shared X310/UBX setup; the original remains at 1 hop/s. See the
-[configuration and timing limits](docs/CONFIGURATION.md#version-11-frequency-hopping).
-[Reference rates](docs/CONFIGURATION.md#reference-rates) add tested
-100/500 kbit/s simple 2FSK profiles alongside 250 kbit/s. Non-integral resampling,
-wider clock tracking and target-specific shaping remain explicitly deferred.
-[Fidelity checks](docs/CONFIGURATION.md#fidelity-acceptance) verify
-independent packet/IQ references, digital spectrum and receiver recovery. Calibrated
-RF measurements and actual-target interoperability remain unqualified.
+- **X310:** one computer owns both UBX-160 channels in a shared process.
+- **B205:** each of two computers owns one SDR; application data travels over RF.
+  Ethernet and SSH are optional for administration and benchmark control.
+
+Both arrangements have conducted packet-delivery checks. The latest X310 smoke
+test verified discovery, GUI start/stop, both directions and simultaneous traffic.
+B205 checks cover fixed-frequency operation and authenticated generic-v5 RF
+hopping with independent computer clocks. See [measured results and calculated
+payload tables](MODULATION_RESULTS.md) and [hardware setup and qualification
+scope](docs/UHD_SETUP.md) for the exact settings and limitations.
+
+The terminal GUI provides modulation-specific fields, input limits, packet
+creation/editing, saved projects, hardware checks and owned radio start/stop.
+[Schema-2 profiles](docs/CONFIGURATION.md#version-11-reusable-profiles-schema-2)
+select reliable, signed `generic-v5` packets or configurable ACK-free
+`simple-frame-v1` packets. All five modulations support both formats. Schema-1
+configurations and legacy captures remain supported.
+
+For X310 hopping, the program holds the analog LO at the hop-table midpoint and
+changes digital frequency offsets. With a 1 MHz configured signal, the allowed
+hop-center span is at most 159 MHz. Automatic payload sizing trades packet
+capacity for dwell time, with a calculated software ceiling of 29 hops/s;
+actual qualification depends on modulation and settings. B205 uses ordinary
+retuning and RF leader synchronization. Its normal GUI limit remains **1 hop/s**;
+higher measured rates use explicit benchmark overrides, not supported GUI defaults.
+
+The B205 results include different bit rates and payload sizes. QPSK's newer
+hopping checks use 500 kbit/s, while the other modulations use 250 kbit/s.
+Larger QPSK packets reported receive overflows; 2FSK and GMSK also had
+fixed-frequency simultaneous-traffic failures at a tested upper endpoint.
+Passing one hopping workload does not qualify every frequency or traffic pattern.
+[Independent fidelity checks](docs/CONFIGURATION.md#fidelity-acceptance) and the
+[reference wire-format contract](docs/EMULATION_PROFILE.md) document the emulated
+behavior. Interoperability with a particular commercial radio remains unverified.
 
 The distribution and commands are named **`packet-radio`**; Python imports use
 **`packet_radio`**. See [migration](docs/CONFIGURATION.md#upgrading-to-packet-radio-100)
@@ -60,8 +67,11 @@ packet-radio-ui --node-role a
 packet-radio-ui --node-role b
 ```
 
-For the crossed 30 dB attenuated B205 bench, set TX gain to `20 dB` and RX gain
-to `40 dB` on each GUI draft before saving. New drafts start at 0 dB.
+New drafts start at TX/RX gain 0 dB. The shipped fixed-frequency B205 examples
+and bench preset use TX 20 dB / RX 40 dB from the earlier conducted tests. The
+later RF-hopping measurements used TX 30 dB on dev5, TX 60 dB on dev10, and
+RX 40 dB on both, with 30 dB attenuation in each crossed path. These are distinct
+tested setups; use the matching [setup details](docs/UHD_SETUP.md#b205-timing-experiments).
 Save each local project and use Start. The initial setup is bidirectional 2FSK,
 915 MHz, 250 kbit/s, with simple frames and a fixed frequency. Keep the waveform
 and packet settings matched on both computers. UDP endpoints stay on localhost;
@@ -85,7 +95,9 @@ conducted bench preset applies TX 20 dB / RX 40 dB for the crossed 30 dB attenua
 setup. **Keep current gains** preserves custom values. Apply edits the draft;
 Save and Start are separate actions. The X310 mode retains its local channel pair.
 
-Choose **Export project** (Ctrl+E), enter a new folder and the other B205's serial.
+For a fixed-frequency simple-frame B205 pair, choose **Export project** (Ctrl+E),
+enter a new folder and the other B205's serial. Authenticated RF-hopping projects
+use explicit node files and locally provisioned private keys instead.
 The folder contains `computer-a.yaml`, `computer-b.yaml` and one shared
 `profiles/` file. Copy the whole folder to the other computer. Open the matching
 node on each host, then Start. Hardware settings can be edited separately; after
@@ -106,7 +118,7 @@ packet_radio/          Application, transmit/receive processing, modems, protoco
 configs/
     examples/             Generic paired profiles to customize
     bench/                Profiles for the tested local SDR pair
-    profiles/             Reusable version 1.1 radio definitions
+    profiles/             Reusable waveform and framing definitions
     v1_1/                 Paired schema-2 node configurations
 tests/
     modems/               Waveforms, FEC, burst framing and decoder tests
@@ -127,10 +139,12 @@ The UDP integration tests require permission to create local sockets.
 
 Install the local wheel supplied with this release; no public package index
 publication is implied. For hardware, first create the interpreter-matched UHD
-virtual environment described in [UHD setup](docs/UHD_SETUP.md).
+virtual environment described in [UHD setup](docs/UHD_SETUP.md). Install from
+outside the checkout so local build metadata cannot mask the installed version.
 
 ```bash
-python -m pip install /path/to/packet_radio-1.1.0-py3-none-any.whl
+cd /tmp
+python -m pip install /path/to/packet_radio-1.3.0-py3-none-any.whl
 packet-radio --help
 packet-radio-conformance
 ```
@@ -149,7 +163,7 @@ packet-radio-validate configs/examples/peer-a-bpsk.yaml configs/examples/peer-b-
 Choose each SDR's serial, provision keys and start the paired applications as
 shown in the [program guide](docs/PROGRAM_GUIDE.md). Paths inside YAML resolve
 relative to the working directory for schema 1, and to the node YAML for schema 2;
-keep replay state across restarts. See [1.1 migration](docs/CONFIGURATION.md#upgrading-from-100-to-110).
+keep replay state across restarts. See [upgrading to 1.3](docs/CONFIGURATION.md#upgrading-to-radio-emulator-13).
 Installed guides are in `$VIRTUAL_ENV/share/packet-radio/docs`.
 
 To verify the installed wheel outside the checkout, without SDR access:
@@ -203,7 +217,8 @@ python -m pytest -q tests/configuration tests/tui tests/runtime
 Use Tab/Shift+Tab to navigate, Enter to apply text, F5 to validate, F2 for Advanced,
 F8 to focus an error, Ctrl+O to open, Ctrl+N for a new draft and Ctrl+Q to quit. Selecting a modulation
 applies its preset waveform settings and shows only applicable controls.
-For variable-length 2FSK hopping, **Payload sizing → automatic** calculates the
+For variable-length simple-frame X310 hopping on any supported modulation,
+**Payload sizing → automatic** calculates the
 accepted byte limit from hop timing, bit rate and framing. **Max payload bytes**
 becomes an upper ceiling; the effective limit appears in the form and summary.
 The `configs/v1_1/peer-a-x310-auto-hopping.yaml` example starts at 8 hops/s with
@@ -211,7 +226,8 @@ The `configs/v1_1/peer-a-x310-auto-hopping.yaml` example starts at 8 hops/s with
 bound is capped at 29 hops/s and may be lower when timing requires it. Oversized input is rejected.
 Use Ctrl+S to save, F4 for Save As, F6 to export a complementary peer and F7 to
 import a legacy schema-1 configuration into a new schema-2 draft. Editing and
-saving work offline. Hardware access happens only through explicit checks:
+saving work offline. New sessions discover devices automatically unless
+`--offline` is selected. Additional hardware checks are explicit:
 
 - **F9:** refresh devices; **F3:** view results and select a discovered device.
 - **F10:** check the current draft against the selected SDR.
@@ -228,7 +244,8 @@ adjustments, including the UBX-160's fixed 160 MHz analog bandwidth. Hardware
 capability ranges do not guarantee every intermediate sample rate or measured
 throughput. The editor can also run saved configurations:
 
-- **Ctrl+R / Start:** start one saved node.
+- **Ctrl+R / Start:** start the saved local node; simple-frame X310 projects
+  automatically include the other local channel.
 - **Ctrl+Shift+R / Start pair:** select a saved peer for a shared X310 launch.
 - **Ctrl+B / Packets:** [build and edit packets](docs/TERMINAL_GUI_GUIDE.md#build-modify-and-inspect-packets), save templates, preview framing, send/repeat and inspect received data.
 - **Ctrl+T or Ctrl+C:** stop the owned radio; **F12:** view live per-channel status, run settings and logs.
@@ -259,7 +276,7 @@ inapplicable fields appear as N/A. Ctrl+T and Ctrl+C also stop from the details
 dialog. No network control endpoint is added.
 
 The terminal interface supports all five modulations, configurable simple frames
-and phase-coordinated hopping on the shared X310.
+and hopping on the shared X310 or authenticated RF-synchronized B205 pair.
 Hopping retains its whole-burst boundary-drop policy; F12 shows admission drops
 and hop timing diagnostics. Arbitrary packet-arrival phases can still lose bursts.
 
@@ -325,8 +342,9 @@ bounded control queue lets ACKs and timing beacons proceed without evicting data
 The link retries unacknowledged packets, suppresses duplicate delivery, and records
 exhausted retries. An RF ACK confirms radio receipt, not that the local UDP consumer
 processed the packet; local output errors are counted separately. Simple-frame modes
-have no ACKs, retries, duplicate suppression or timing beacons. Their supplied pair
-is transmit-only/receive-only; set both nodes to `bidirectional` for two-way traffic.
+have no ACKs, retries, duplicate suppression or timing beacons. The basic simple-frame pair
+is transmit-only/receive-only; the two-computer B205 and shared X310 examples
+are bidirectional.
 
 ## Compatibility and development
 

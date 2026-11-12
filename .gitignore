@@ -1,15 +1,64 @@
+# Python bytecode and tool caches
 __pycache__/
 *.py[cod]
+.cache/
 .pytest_cache/
-.coverage
-coverage.xml
 .mypy_cache/
 .ruff_cache/
-.venv/
-.venv-uhd/
+.hypothesis/
+.tox/
+.nox/
+
+# Local Python environments (including .venv-uhd)
+.venv*/
+venv/
+env/
+ENV/
+
+# Test and coverage output
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+junit.xml
+pytestdebug.log
+
+# Packaging output
 *.egg-info/
+*.egg
+*.whl
 build/
 dist/
+
+# Local environment settings; keep shareable templates eligible for tracking
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+
+# Radio recordings, generated identities and persistent replay state
 captures/
 keys/
 state/
+*-private.pem
+*-replay.json
+iq.c64
+iq-*.c64
+frames.jsonl
+frames-*.jsonl
+
+# Logs and editor/OS scratch files
+*.log
+*.log.*
+*.swp
+*.swo
+*~
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini
+.idea/
+# Retain the existing shared pytest settings, but ignore other local VS Code state.
+.vscode/*
+!.vscode/settings.json

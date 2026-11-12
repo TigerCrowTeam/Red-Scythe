@@ -85,7 +85,7 @@ def check_capture(config, directory: Path, *, hopping: bool = False) -> None:
 
 def main() -> None:
     package = distribution("packet-radio")
-    assert package.version == packet_radio.__version__ == "1.1.0"
+    assert package.version == packet_radio.__version__ == "1.3.0"
     assert Path(packet_radio.__file__).resolve().is_relative_to(Path(sys.prefix).resolve()), (
         "check must import the installed wheel, not the source checkout"
     )
