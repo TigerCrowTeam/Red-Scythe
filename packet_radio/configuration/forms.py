@@ -290,6 +290,16 @@ class FormSession:
                 chosen = normalize_definition(
                     read_yaml(template_root() / "profiles/simple-2fsk-hopping-v1.yaml")
                 )
+                if self.selection.packet_format == "generic-v5":
+                    chosen = read_yaml(
+                        template_root() / "profiles/generic-2fsk-b205-rf-hopping-v5.yaml"
+                    )
+                    self.draft.set("profile.link.hardware_clock_sync", True)
+                    self.draft.set("profile.link.hardware_slot_scheduling", False)
+                    self.draft.set("profile.link.tdd_period_seconds", 0.0)
+                    self.draft.set("profile.link.tdd_guard_seconds", 0.0)
+                    self.draft.set("node.runtime.hardware_timed_io", True)
+                    self.draft.set("node.runtime.hardware_sync_tx_lead_seconds", 0.05)
                 self.draft.set("profile.frequency", chosen["frequency"])
             else:
                 current = self.draft.profile["frequency"]

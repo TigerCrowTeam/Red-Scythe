@@ -87,9 +87,15 @@ def bind_device(source: RadioDraft, selected: Deployment) -> RadioDraft:
     if not report.valid:
         raise ValueError("Settings do not fit the detected SDR: " + report.issues[0].message)
     assert report.config is not None
-    if selected.mode == "remote-b205" and len(report.config.frequency.frequencies_hz) > 1:
+    from packet_radio.protocol.rf_hopping import enabled as rf_hopping
+
+    if (
+        selected.mode == "remote-b205"
+        and len(report.config.frequency.frequencies_hz) > 1
+        and not rf_hopping(report.config)
+    ):
         raise ValueError(
-            "Automatic two-computer setup currently requires a fixed frequency; independent-host hopping needs a separate synchronization setup."
+            "Automatic two-computer setup requires fixed frequency or generic-v5 RF leader synchronization."
         )
     return result
 
@@ -150,4 +156,83 @@ def shared_peer(source: RadioDraft, destination: str | Path) -> RadioDraft:
         raise ValueError(peer.issues[0].message)
     assert peer.config is not None
     validate_shared_pair([cfg, peer.config])
+    return result
+
+
+SETUP_MODES = {
+    "remote-b205": "B205 — remote radio peer",
+    "shared-x310": "X310 — two local channels",
+}
+GAIN_PRESETS = {
+    "keep": "Keep current gains",
+    "conservative": "Conservative startup — TX 0 dB / RX 0 dB",
+    "b205-bench": "B205 conducted bench — TX 20 dB / RX 40 dB (30 dB attenuation)",
+}
+
+
+def configure_setup(
+    source: RadioDraft, *, mode: str, role: str, identifier: str, preset: str = "keep"
+) -> RadioDraft:
+    """Apply explicit local setup choices without changing the shared waveform.
+
+    Mode and role are persisted in existing hardware/identity fields. Selecting a
+    mode is not a hardware probe, a peer handshake or a qualification claim.
+    """
+    if mode not in SETUP_MODES or role not in ("a", "b") or preset not in GAIN_PRESETS:
+        raise ValueError("Choose a supported operating mode, computer role and gain preset.")
+    identifier = identifier.strip()
+    if not identifier:
+        raise ValueError("Enter this B205's serial or the shared X310's address.")
+    if preset == "b205-bench" and mode != "remote-b205":
+        raise ValueError("The B205 bench preset cannot be applied to an X310.")
+    current = source.validate().config
+    if current is not None and current.authentication.private_key_file is not None:
+        desired_id = 1 if role == "a" else 2
+        if current.node_id != desired_id:
+            raise ValueError(
+                "Authenticated identities require explicit node/key configuration; Setup cannot change the identity."
+            )
+    node = source.node
+    hardware = node.setdefault("hardware", {})
+    device_type = "b200" if mode == "remote-b205" else "x300"
+    # Retain transport arguments only when staying on the same hardware family.
+    arguments = hardware.get("device", {}).copy()
+    if arguments.get("type") != device_type:
+        arguments = {}
+    arguments.pop("addr" if mode == "remote-b205" else "serial", None)
+    arguments.update(type=device_type)
+    arguments["serial" if mode == "remote-b205" else "addr"] = identifier
+    hardware["device"] = arguments
+    if mode == "remote-b205":
+        hardware["channel"] = 0
+    elif source.node.get("hardware", {}).get("device", {}).get("type") != "x300":
+        hardware["channel"] = 0
+    if preset != "keep":
+        hardware.update(
+            tx_gain=20 if preset == "b205-bench" else 0, rx_gain=40 if preset == "b205-bench" else 0
+        )
+    node.update(
+        node_id=1 if role == "a" else 2,
+        peer_id=2 if role == "a" else 1,
+        timing_role="leader" if role == "a" else "follower",
+    )
+    result = RadioDraft(source.node, source.profile, source.node_path)
+    result.source_versions = source.source_versions.copy()
+    result.read_only_source = source.read_only_source
+    for key in ("hardware", "node_id", "peer_id", "timing_role"):
+        result.set("node." + key, node[key])
+    report = result.validate()
+    if not report.valid:
+        raise ValueError(report.issues[0].message)
+    assert report.config is not None
+    from packet_radio.protocol.rf_hopping import enabled as rf_hopping
+
+    if (
+        mode == "remote-b205"
+        and len(report.config.frequency.frequencies_hz) > 1
+        and not rf_hopping(report.config)
+    ):
+        raise ValueError(
+            "Two-computer setup requires fixed frequency or generic-v5 RF leader synchronization."
+        )
     return result

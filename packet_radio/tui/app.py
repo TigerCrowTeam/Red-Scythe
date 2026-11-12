@@ -37,6 +37,8 @@ from packet_radio.runtime.controller import RadioController
 from packet_radio.tui.dialogs import DiscardDialog, PathDialog, PeerDialog
 from packet_radio.tui.hardware import DeploymentDialog, HardwareDialog
 from packet_radio.tui.run import RunDetails, SaveBeforeRunDialog, StartDialog, describe
+from packet_radio.tui.setup import BundleDialog, SetupDialog
+from packet_radio.tui.telemetry import connection_summary
 from packet_radio.tui.widgets import Entries, FieldRow, field_id
 
 
@@ -56,6 +58,8 @@ class RadioEditor(App):
         ("f2", "advanced", "Advanced"),
         ("f9", "refresh_devices", "Refresh devices"),
         ("ctrl+d", "detect_setup", "Detect setup"),
+        ("ctrl+g", "configure_setup", "Setup"),
+        ("ctrl+e", "export_bundle", "Export project"),
         ("f10", "check_hardware", "Check hardware"),
         ("ctrl+p", "check_pair", "Check X310 pair"),
         ("f11", "cancel_hardware", "Cancel check"),
@@ -70,7 +74,10 @@ class RadioEditor(App):
     CSS = """
     Screen { background: $surface; }
     #toolbar { height: 3; }
+    #toolbar Button { min-width: 9; width: auto; }
+    #deployment-status { height: auto; max-height: 2; padding: 0 1; }
     #run-status { height: auto; max-height: 3; padding: 0 1; }
+    #connection-status { height: auto; max-height: 2; padding: 0 1; }
     #run-toolbar { height: 3; }
     #run-toolbar Button { min-width: 10; width: auto; }
     #run-dialog { width: 95%; height: 90%; padding: 1 2; border: round $accent; }
@@ -149,11 +156,14 @@ class RadioEditor(App):
                 [("Project", "Project")], value="Project", allow_blank=False, id="sections"
             )
             yield Checkbox("Advanced", id="advanced")
+            yield Button("Setup", id="configure-setup")
+            yield Button("Export project", id="export-bundle")
         yield Static(self.hardware_status, id="hardware-status", markup=False)
         yield Static("", id="deployment-status", markup=False)
         yield Static(
             "Stopped · Ctrl+R start · Ctrl+T stop · F12 details", id="run-status", markup=False
         )
+        yield Static("", id="connection-status", markup=False)
         with Horizontal(id="run-toolbar"):
             yield Button("Start", id="start-radio")
             yield Button("Start pair", id="start-pair")
@@ -507,6 +517,10 @@ class RadioEditor(App):
             await self.action_first_error()
         elif event.button.id == "start-radio":
             await self.action_start_radio()
+        elif event.button.id == "configure-setup":
+            await self.action_configure_setup()
+        elif event.button.id == "export-bundle":
+            await self.action_export_bundle()
         elif event.button.id == "start-pair":
             await self.action_start_pair()
         elif event.button.id == "stop-radio":
@@ -611,6 +625,43 @@ class RadioEditor(App):
             )
         except (OSError, ValueError) as exc:
             self.main_screen.query_one("#summary", Static).update("Save failed: " + str(exc))
+
+    def setup_busy(self):
+        busy = self.controller.active or (
+            self.hardware_task is not None and not self.hardware_task.done()
+        )
+        if busy:
+            self.run_notice = "Stop the radio and finish hardware discovery before changing setup."
+            self.update_run_status()
+        return busy
+
+    async def action_configure_setup(self):
+        if not self.setup_busy() and await self.valid_for_write():
+            self.push_screen(SetupDialog(self.session.draft), self.apply_setup)
+
+    async def apply_setup(self, result):
+        if result is None or self.setup_busy():
+            return
+        self.session = FormSession(result)
+        self.session.replaced_profile = True  # Setup edits require an explicit save.
+        self.replacing_project = True
+        self.pending.clear()
+        self.table_buffers.clear()
+        self.errors.clear()
+        await self.render_form()
+        self.run_notice = "Setup applied to draft; Save before Start."
+        self.update_run_status()
+
+    async def action_export_bundle(self):
+        if not self.setup_busy() and await self.valid_for_write():
+            self.push_screen(BundleDialog(self.session.draft), self.bundle_exported)
+
+    def bundle_exported(self, path):
+        if path:
+            self.main_screen.query_one("#summary", Static).update(
+                f"Exported {path} · Copy the entire folder to the other computer. "
+                "Open computer-a.yaml on A and computer-b.yaml on B. Current draft unchanged."
+            )
 
     async def action_export_peer(self):
         if await self.valid_for_write():
@@ -859,13 +910,17 @@ class RadioEditor(App):
         if config is not None:
             device_type = config.sdr.device.get("type")
             mode = (
-                "X310 · Start runs both local simple-frame channels"
+                "Mode: X310 — two local channels · Start runs both simple-frame nodes"
                 if device_type == "x300" and config.packet_format == "simple-frame-v1"
-                else "B205 · Start runs this computer's node; the other computer communicates over RF"
+                else f"Mode: B205 — remote radio peer · Computer {'A' if config.timing_role == 'leader' else 'B'} · Start runs only this node"
                 if device_type == "b200"
                 else "Manual setup · Use Start pair for a saved X310 peer"
             )
             self.main_screen.query_one("#deployment-status", Static).update(mode)
+        else:
+            self.main_screen.query_one("#deployment-status", Static).update(
+                "Operating mode unavailable until draft errors are fixed"
+            )
         if not c.active and self.hardware_status.startswith("Radio owns the device"):
             self.hardware_status = (
                 "Hardware unverified after radio shutdown · F9 refresh · F10 check"
@@ -875,12 +930,19 @@ class RadioEditor(App):
         if c.active and c.running_configs:
             summary += " · " + describe(c.running_configs).replace("\n", " · ")
             summary += " · Draft edits require stop/restart"
+        displayed = c.running_configs[0] if c.active and c.running_configs else config
+        remote = displayed is not None and displayed.sdr.device.get("type") == "b200"
+        self.main_screen.query_one("#connection-status", Static).update(
+            connection_summary(c) if remote else ""
+        )
         self.main_screen.query_one("#run-status", Static).update(summary)
         invalid = not self.session.report.valid or bool(
             self.pending or self.errors or self.table_buffers
         )
         invalid = invalid or any(t.dirty for t in self.main_screen.query(Entries))
         busy = c.active or (self.hardware_task is not None and not self.hardware_task.done())
+        for identifier in ("configure-setup", "export-bundle"):
+            self.main_screen.query_one("#" + identifier, Button).disabled = busy
         for identifier in ("start-radio", "start-pair"):
             self.main_screen.query_one("#" + identifier, Button).disabled = busy or invalid
         self.main_screen.query_one("#stop-radio", Button).disabled = not c.active

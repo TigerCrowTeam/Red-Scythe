@@ -18,8 +18,9 @@ it does not change the meaning or priority of application data.
 
 The generic core, direct UHD backend and shared configuration interfaces are
 implemented. The shared-channel X310 is the reference for the documented conducted
-setup. B205 operation needs workload-specific validation, and independent-host
-testing remains deferred. See the calculated [hop/payload tables](../MODULATION_RESULTS.md)
+setup. Two B205s on separate computers have also passed fixed-frequency tests
+on all five modulations, including simultaneous traffic. Performance remains
+workload-specific. See the calculated [hop/payload tables](../MODULATION_RESULTS.md)
 and [UHD setup](UHD_SETUP.md).
 
 ## Automatic hardware selection
@@ -35,8 +36,10 @@ Choose computer A on one B205 host and B on the other, or pass `--node-role a`
 and `--node-role b` when opening new GUI sessions. Save these choices in each
 local project. Initial automatic projects use matching fixed-frequency,
 bidirectional simple frames. They require no shared wall-clock epoch. Independent
-host hopping needs a separate synchronization design and is rejected by the
-automatic B205 binding path; X310 hopping remains available unchanged.
+host hopping uses the explicit generic-v5 `rf-leader` mode: the follower acquires
+the leader over RF and maps its own hardware clock to the leader’s schedule.
+Automatic B205 binding accepts that mode, but rejects simple-frame external-UTC
+hopping. X310 hopping remains available unchanged.
 
 Start uses one node for a B205 and generates a complementary simple-frame peer
 for an X310. The generated peer uses the other channel, separate local UDP/status
@@ -80,7 +83,8 @@ retain their separate responsibilities.
 
 See [configuration schema and migration](CONFIGURATION.md) for exact names, rate
 semantics, airtime admission and examples. Old unversioned YAML is rejected.
-Profiles are applied at startup. Configured hopping is supported for simple frames on all five modulations;
+Profiles are applied at startup. All five modulations support simple-frame hopping
+and the separate generic-v5 B205 RF synchronization mode;
 changing a running configuration requires stopping and restarting both matching peers.
 
 ## Authentication setup
@@ -111,8 +115,9 @@ run `packet-radio --config configs/examples/peer-b-bpsk.yaml`. Substitute the sa
 modulation suffix on both hosts for 2FSK, MSK, GMSK or retained QPSK. Use Ctrl+C
 for clean shutdown. The supplied example pair uses identical local ports because
 it targets separate hosts; use the measured `configs/bench/` pair for the current
-two-radio workstation setup, with keys provisioned there too. The two-host workflow
-is documented but still awaits physical qualification.
+two-radio workstation setup, with keys provisioned there too. See
+[UHD setup](UHD_SETUP.md#two-computers-with-one-b205-each) for the maintained
+two-host checker, fixed-frequency results and RF synchronization qualification.
 
 ## Local packet interface
 
@@ -352,3 +357,28 @@ retune. Other hardware and fixed-frequency operation use ordinary automatic tuni
 The current supported cap is 29 hops/s. See MODULATION_RESULTS.md for the calculated
 payload tradeoff; the cap is an application limit, not the X310's absolute
 hardware tuning limit.
+
+## Two-computer projects
+
+The GUI's Setup control selects local B205 operation or the existing shared X310
+mode, assigns A/B identities and applies optional hardware gain presets. This is
+stored in the existing schema-2 node fields; both modes use the same waveform,
+packet-processing and UHD code. No separate radio program or network payload
+transport is introduced.
+
+Export project writes a portable folder with two complementary B205 node files
+and a single content-named shared radio profile. Node files hold independent SDR
+serials, gains and local ports; the profile holds modulation, rates, frequency and
+framing. The folder can be copied to another host and opened without the original
+checkout paths. Recording and authentication paths are excluded, and this export
+is limited to fixed-frequency simple frames. Existing explicit peer export covers
+other configurations.
+
+Each computer starts and stops only its own B205. The GUI distinguishes local
+startup from recent received peer traffic using fresh local status snapshots.
+A silent peer is not necessarily disconnected. SSH can coordinate tests and
+administration, but the radio link needs no LAN or SSH connection. Shared-setting
+changes require exporting/distributing a new pair; there is no automatic remote
+configuration negotiation. Independent-clock hopping is an explicit generic-v5
+mode with RF clock acquisition, beacon-loss detection and reacquisition; it does
+not negotiate different profiles between peers.

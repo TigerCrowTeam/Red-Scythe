@@ -452,6 +452,15 @@ def validate_config(config: RadioConfig, *, processing: ProcessingProfile | None
         raise ValueError("hopping above 1 hop/s requires an explicitly selected X300-series device")
     if freq.reacquire_dwell_seconds <= 0 or freq.sync_loss_seconds <= 0:
         raise ValueError("invalid synchronization recovery settings")
+    from packet_radio.protocol.rf_hopping import enabled as rf_hopping
+
+    if rf_hopping(config):
+        if sdr.device.get("type") != "b200" or sdr.channel != 0:
+            raise ValueError("RF leader hopping currently requires B205 channel 0")
+        if config.recording.directory is not None and config.recording.iq:
+            raise ValueError(
+                "RF hopping IQ recording requires discontinuity metadata; use frame recording"
+            )
     link = config.link
     if link.ack_timeout_seconds <= 0 or link.max_retries < 0 or link.duplicate_window_seconds <= 0:
         raise ValueError("invalid ACK, retry, or duplicate window settings")

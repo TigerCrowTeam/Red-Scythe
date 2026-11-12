@@ -28,6 +28,50 @@ For B205 projects, Start launches only this computer's node. For simple-frame
 X310 projects, Start generates the other local channel automatically. Start pair
 still accepts two saved X310 nodes for explicit peer settings. Both B205 hosts
 must use matching radio/packet settings; their UDP endpoints remain local.
+For the tested B205 setup with a 30 dB attenuator in each crossed coax path,
+enter `20 dB` for **TX gain** and `40 dB` for **RX gain** on both computers.
+New auto-detected drafts start at 0 dB; these bench gains must be entered or
+loaded from the `peer-a-b205-two-host.yaml` / `peer-b-b205-two-host.yaml` examples.
+
+## Operating setup inputs
+
+Choose **Setup** or press Ctrl+G while the radio and hardware checks are stopped.
+The existing waveform and packet settings are retained. Apply changes the draft;
+Save is required before starting it. Mode and role are stored in the node's normal
+hardware and identity settings and return when you reopen it.
+
+| Field | Allowed inputs | What it changes |
+|---|---|---|
+| **Operating mode** | `B205 — remote radio peer` or `X310 — two local channels`. | Chooses one B205 node on this computer or the X310 local pair. B205 setup accepts fixed frequency or generic-v5 RF-synchronized hopping. Simple-frame X310 Start generates its second node; generic-v5 still needs an explicit peer. |
+| **Local B205 serial / shared X310 address** | The local B205's serial, or the X310's IP address. Required. | Selects the local hardware. Changing mode clears this field so an identifier from the other hardware family is not reused. Hardware checking verifies the selection. |
+| **Computer role** | `Computer A` or `Computer B`. | A sets node 1, peer 2 and leader; B sets node 2, peer 1 and follower. On X310 this is the primary local node. Authenticated identities require explicit key/identity editing if the node ID would change. |
+| **Gain preset** | `Keep current gains`; `Conservative startup — TX 0 dB / RX 0 dB`; or, for B205 only, `B205 conducted bench — TX 20 dB / RX 40 dB (30 dB attenuation)`. | Sets hardware gain values, which remain editable afterward. The bench preset is for a 30 dB attenuator on each crossed coax path; it does not qualify other modulations or link conditions. |
+| **Apply setup** | Select to apply, or Cancel to keep the draft unchanged. | Updates only local setup and identity fields. It does not save, start, contact the peer or retune hardware. |
+
+## Two-computer export inputs
+
+Choose **Export project** or press Ctrl+E. Export uses the current validated draft,
+including unsaved edits, and leaves that draft unchanged. This export currently
+supports fixed-frequency, simple-frame B205 pairs. Existing F6 Export peer remains
+available for explicit X310 or authenticated peer configuration.
+
+| Field | Allowed inputs | What it changes |
+|---|---|---|
+| **New folder** | A new folder path that does not already exist. | Receives `computer-a.yaml`, `computer-b.yaml` and one shared `profiles/` file. Existing folders are never overwritten. |
+| **Other computer's B205 serial** | A nonempty serial different from the local B205 serial. | Assigns the remote node to its own SDR. The local serial must already be set in Setup or Hardware. |
+| **Export project** | Select to write the folder, or Cancel. | Creates complementary roles/IDs and matches the on-air settings. Peer gains initially match the source. Both hosts use localhost application/status addresses and may reuse the same port numbers. Recording and authentication paths are omitted; HTTP status is enabled. |
+
+Copy the **whole folder**, including `profiles/`, to the other computer. Open
+`computer-a.yaml` on A and `computer-b.yaml` on B, then Start each independently.
+You can adjust each node's gain, device or ports without affecting the other.
+After changing modulation, frequency, framing or other shared radio settings,
+export a new pair and copy it to both hosts; Save on one node does not synchronize
+the other computer. No SSH credentials or network peer addresses are stored.
+
+The B205 run display separates **Local radio** readiness from **Remote peer**
+activity. Recent received packets are evidence of peer activity; silence may
+mean an idle peer. Missing, disabled or stale status reports show activity as
+unknown rather than carrying forward an old connected indication.
 
 ## Terminal configuration and operation
 
@@ -105,11 +149,11 @@ timestamps exclude samples from the old frequency.
 | Field | Allowed inputs | What it changes |
 |---|---|---|
 | **Hop rate** | Positive hops/s. Manual sizing: up to 2 for x300, otherwise 1. Automatic sizing: up to 29 for x300, or the displayed timing-based limit if lower (other devices still at most 1). | Frequency changes per second; 7 gives about 143 ms per frequency. Automatic mode reduces payload capacity as you increase the rate. Its upper bound is a timing estimate, not a guarantee of hardware performance. Both peers need matching settings. |
-| **Mode** | `fixed`; simple-frame mode also allows `hopping`. | `fixed` holds one frequency. `hopping` follows a timed table and is currently restricted to simple-frame mode. Changing mode installs the corresponding supported frequency defaults; review the resulting table/schedule. |
+| **Mode** | `fixed`; `hopping` for simple frames or generic-v5 on B205. | `fixed` holds one frequency. `hopping` follows a timed table. Simple frames use external UTC; generic-v5 on B205 acquires the leader’s hardware clock over RF. Changing mode installs the corresponding supported frequency defaults; review the resulting table/schedule. |
 | **Center frequency hz** | Positive Hz/kHz/MHz value within the SDR’s tuning range; e.g. `915 MHz`. | Requested RF center frequency in fixed mode, such as `915 MHz`. Positive, within the selected daughterboard's range. This is independent of the USRP's Ethernet address and the local UDP ports. |
 | **Frequencies hz** | 2–256 unique positive frequencies, in the desired order; each within the SDR’s tuning range. | Ordered hop table, 2–256 unique positive frequencies. Add/remove/reorder entries, then apply rows or F5. Both peers need the same table/order; each entry must pass device and airtime checks. |
 | **Guard seconds** | Manual sizing: at least `100 ms`. Automatic sizing with x300: at least `1 ms`. Always less than half the dwell. | Settling and end-of-hop quiet time. Larger guards leave less room for payload. The 1 ms guard applies to the continuous DSP path on the shared X310/UBX setup; other boards and hosts need their own checks. |
-| **Epoch** | Nonnegative numeric UTC timestamp in seconds; e.g. `0`. No formatted date strings. | Shared schedule origin as a nonnegative numeric POSIX/UTC timestamp (seconds since 1970-01-01 UTC), not a local clock string. Both peers must use the same value and synchronized UTC clocks. |
+| **Epoch** | Nonnegative numeric UTC timestamp in seconds; e.g. `0`. No formatted date strings. | Shared schedule origin as a nonnegative numeric POSIX/UTC timestamp (seconds since 1970-01-01 UTC), not a local clock string. Simple-frame peers need the same value and synchronized UTC clocks. Generic-v5 RF hopping requires `0`; its schedule follows the leader’s hardware clock without shared host UTC. |
 | **Sequence mode** | `cycle`, `ping_pong`. | `cycle` repeats the table from the beginning; `ping_pong` traverses it forward and backward without repeating the endpoints at each turn. For A/B/C: cycle A-B-C-A; ping-pong A-B-C-B-A. |
 
 With the supplied automatic X310 example (250 kbit/s 2FSK, 2 Msps, 1 ms guards,
@@ -129,7 +173,7 @@ they do not mean every listed rate/payload combination has passed hardware testi
 
 | Field | Allowed inputs | What it changes |
 |---|---|---|
-| **Format** | `generic-v5`, `simple-frame-v1` for all five modulations. | `generic-v5` provides the fixed reliable protocol, addressing and authentication support. `simple-frame-v1` provides configurable ACK-free framing and enables hopping. Changing format resets dependent profile sections; it is more than changing a header byte. |
+| **Format** | `generic-v5`, `simple-frame-v1` for all five modulations. | `generic-v5` provides reliable delivery, addressing and authentication, with fixed frequency or B205 RF-synchronized hopping. `simple-frame-v1` provides configurable ACK-free framing and enables hopping. Changing format resets dependent profile sections; it is more than changing a header byte. |
 | **Max payload bytes** | Whole number 1–1024 bytes. | In manual mode, the accepted application packet limit. In automatic mode, an upper ceiling: the actual limit can be smaller to fit a hop. Application headers/trailers count toward this limit; outer framing/protection is additional. |
 | **Payload sizing** | `manual` or `automatic`; available for variable-length hopping packets. | Automatic recalculates the accepted payload size when hop timing, bit rate, framing, protection or the ceiling changes. Smaller packets remain valid. Oversized inputs are rejected, never truncated or automatically fragmented. The effective byte limit appears in the form and status summary. |
 | **Preamble** | 1–64 hex bytes, e.g. `55`; repeated total must not exceed 256 bytes. | Hex bytes repeated before sync to aid signal acquisition. Enter complete bytes, e.g. `55`. Pattern length is 1–64 bytes and the expanded repeated preamble must be 1–256 bytes. |
@@ -168,7 +212,7 @@ they do not mean every listed rate/payload combination has passed hardware testi
 | **Tdd leader bursts per slot** | Whole number 1 or greater. | Positive integer limit on leader bursts in one TDD slot. Increasing it helps only if every complete burst and gap fits; it does not lengthen the slot. |
 | **Tdd follower bursts per slot** | Whole number 1 or greater. | Positive integer limit on follower bursts in one TDD slot. May differ from the leader to reflect asymmetric traffic; keep peer scheduling expectations compatible. |
 | **Tdd staggered windows** | Checked (on) or unchecked (off). | Allows a side's TX window to start at its half-cycle boundary instead of after a leading guard; the trailing guard remains. This is a timing-policy change requiring matched peer settings, not a throughput guarantee. |
-| **Hardware clock sync** | Checked (on) or unchecked (off). | Uses the implemented generic-link hardware timestamp synchronization. Requires timed I/O. It is separate from the external-UTC contract used by simple hopping and does not configure an external GPS/PPS source. |
+| **Hardware clock sync** | Checked (on) or unchecked (off). | Uses the implemented generic-link hardware timestamp synchronization. Requires timed I/O. Required for generic-v5 B205 RF hopping, which also requires timed I/O and disables TDD/hardware slot scheduling. It is separate from simple-frame external UTC and does not configure GPS/PPS. |
 | **Hardware slot scheduling** | Checked (on) or unchecked (off). | Schedules generic TDD bursts at hardware times. Requires timed I/O, hardware clock sync and a positive TDD period. Slot lookahead and submission margin then become relevant. |
 | **Minimum gap seconds** | Duration at least `2 ms`. | Simple-frame minimum idle gap after transmission completion, at least 2 ms. A larger value reduces offered burst rate. This is not start-to-start spacing: packet airtime comes before the gap. |
 | **Minimum interval seconds** | Duration 0 or greater. | Additional simple-frame post-completion spacing, nonnegative; zero adds no interval beyond the other rules. Despite its name, the implementation waits after completion, so it is not an exact packet repetition period. |
@@ -337,7 +381,13 @@ Open **Export peer** with F6 to create the settings for the other radio.
 | Open packet-template path | The saved packet template you want to load into the Packet Builder. |
 | Save packet-template path | Where to save the packet layout and content. This is a separate file from the radio configuration. |
 
-For hopping on BPSK, MSK, GMSK or QPSK, select `simple-frame-v1`, then `hopping`.
+For the shared X310 hopping setup, select `simple-frame-v1`, then `hopping`.
+For independent B205 hopping, select `generic-v5`, device type `b200`, then
+`hopping`; provision each node’s signing keys and matching public keys. The
+synchronization summary becomes `rf-leader`, with at most 1 hop/s and guards of
+at least 100 ms. The follower initially waits on the first table frequency.
+Export project remains fixed/simple only; save or export explicit peer nodes
+for authenticated RF hopping.
 Changing modulation retains the hop schedule and automatic sizing; it selects
 an appropriate preamble and resets waveform/protection presets. Check both peers
 and the effective payload limit after changing settings. Non-2FSK modes use

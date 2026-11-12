@@ -189,7 +189,9 @@ class PeerOptions:
     destination_host: str = "127.0.0.1"
 
 
-def peer_draft(source: RadioDraft, destination: str | Path, options: PeerOptions) -> RadioDraft:
+def peer_draft(
+    source: RadioDraft, destination: str | Path, options: PeerOptions, *, separate_host=False
+) -> RadioDraft:
     """Prepare a complementary peer and verify its pair before writing anything."""
     check_sources(source)
     report = source.validate()
@@ -233,7 +235,9 @@ def peer_draft(source: RadioDraft, destination: str | Path, options: PeerOptions
         config.endpoint.destination_port,
         config.status.http_port,
     }
-    if len(set(ports)) != 3 or set(ports) & local_ports:
+    if separate_host and (options.device_type != "b200" or config.sdr.device.get("type") != "b200"):
+        raise ValueError("Separate-host export requires a B205 on each computer.")
+    if len(set(ports)) != 3 or (not separate_host and set(ports) & local_ports):
         raise ValueError(
             "Peer UDP/status ports must be distinct from each other and the local node."
         )

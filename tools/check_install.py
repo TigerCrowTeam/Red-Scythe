@@ -101,6 +101,16 @@ def main() -> None:
             )
     subprocess.run([sys.executable, str(root / "tools/check_ui_install.py")], check=True)
     assert set(validate_fixture()) == {"data", "ack", "sync"}
+    rf_hopping = {
+        peer: load_config(root / f"configs/v1_1/peer-{peer}-b205-rf-hopping.yaml")
+        for peer in ("a", "b")
+    }
+    validate_network(rf_hopping)
+    assert all(
+        config.emulation["frequency"]["synchronization"] == "rf-leader"
+        for config in rf_hopping.values()
+    )
+    print("B205 RF hopping: installed peer profiles and shared definition validated")
     subprocess.run([sys.executable, str(root / "tools/fidelity_check.py")], check=True)
     with tempfile.TemporaryDirectory(prefix="packet-radio-install-") as temporary:
         keys = {node: generate_key_pair(node, temporary, "release") for node in (1, 2)}

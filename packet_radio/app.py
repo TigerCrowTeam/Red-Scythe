@@ -239,6 +239,10 @@ class RadioApp:
                 record_iq=(self.recorder.record_iq if self.recorder is not None else None),
             )
 
+        rf_sync = getattr(self.behavior, "rf_sync", None)
+        if rf_sync is not None:
+            rf_sync.activate(self)
+
     def _queue(self, payload: bytes, destination: int, *, kind=None) -> bool:
         return self.behavior.queue(self, payload, destination, kind)
 
@@ -456,11 +460,17 @@ class RadioApp:
 
 
 def run(
-    config: RadioConfig, *, timing_diagnostics: bool = False, on_ready=None, run_id=None
+    config: RadioConfig,
+    *,
+    timing_diagnostics: bool = False,
+    on_ready=None,
+    run_id=None,
+    wall_clock=time.time,
 ) -> None:
     app = RadioApp(
         config,
         timing_diagnostics=timing_diagnostics,
+        wall_clock=wall_clock,
         **({"run_id": run_id} if run_id is not None else {}),
     )
     signal.signal(signal.SIGINT, app.stop)

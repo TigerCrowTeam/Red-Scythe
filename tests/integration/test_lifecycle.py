@@ -1,6 +1,7 @@
 """Ownership, startup failures and shutdown of application resources."""
 
 import signal
+import time
 from dataclasses import replace
 from unittest.mock import Mock
 
@@ -127,15 +128,16 @@ def test_hardware_epoch_waits_for_target_and_sets_nanoseconds(app, monkeypatch):
 
 
 @pytest.mark.parametrize("timing", [False, True])
-def test_runner_installs_both_shutdown_handlers(monkeypatch, timing):
+@pytest.mark.parametrize("clock", [time.time, lambda: 123.0])
+def test_runner_installs_both_shutdown_handlers(monkeypatch, timing, clock):
     instance = Mock()
     factory = Mock(return_value=instance)
     handler = Mock()
     monkeypatch.setattr(application, "RadioApp", factory)
     monkeypatch.setattr(application.signal, "signal", handler)
     config = node("leader", 1)
-    application.run(config, timing_diagnostics=timing)
-    factory.assert_called_once_with(config, timing_diagnostics=timing)
+    application.run(config, timing_diagnostics=timing, wall_clock=clock)
+    factory.assert_called_once_with(config, timing_diagnostics=timing, wall_clock=clock)
     assert handler.call_args_list[0].args == (signal.SIGINT, instance.stop)
     assert handler.call_args_list[1].args == (signal.SIGTERM, instance.stop)
     instance.run.assert_called_once()

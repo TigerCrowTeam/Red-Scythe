@@ -25,6 +25,7 @@ dev = [
 ]
 
 [project.scripts]
+packet-radio-check = "packet_radio.cli.bench_cli:main"
 packet-radio-payload = "packet_radio.cli.payload_cli:main"
 packet-radio = "packet_radio.__main__:main"
 packet-radio-status = "packet_radio.cli.status_cli:main"

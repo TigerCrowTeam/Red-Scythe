@@ -72,11 +72,13 @@ class Selection:
             if getattr(self, name) not in choices:
                 raise ValueError(f"unsupported {name}")
         if self.packet_format == "generic-v5" and (
-            self.frequency_mode != "fixed"
+            (self.frequency_mode != "fixed" and self.device_type != "b200")
             or self.operation != "bidirectional"
             or self.fec != "extended-hamming-8-4"
         ):
-            raise ValueError("generic-v5 requires fixed frequency, bidirectional operation and FEC")
+            raise ValueError(
+                "generic-v5 requires bidirectional operation and FEC; hopping requires B205"
+            )
         if self.rrc and self.modulation not in ("bpsk", "qpsk"):
             raise ValueError("RRC is only supported for BPSK/QPSK")
 
@@ -366,7 +368,7 @@ def _build_catalog() -> tuple[FieldSpec, ...]:
         "dwell_seconds": ("number", ("hopping",), ()),
         "guard_seconds": ("number", ("hopping",), ()),
         "epoch": ("utc_timestamp", ("hopping",), ()),
-        "synchronization": ("summary", ("hopping",), ("external-utc",)),
+        "synchronization": ("summary", ("hopping",), ("external-utc", "rf-leader")),
         "sequence_mode": ("select", ("hopping",), ("cycle", "ping_pong")),
         "repeated_frequencies": ("summary", ("hopping",), ("reject",)),
     }
@@ -381,7 +383,7 @@ def _build_catalog() -> tuple[FieldSpec, ...]:
             access="read_only" if fixed else "editable",
             reason="Canonical dwell is edited through hop rate"
             if name == "dwell_seconds"
-            else "Only the existing UTC/no-duplicates contract is supported"
+            else "Synchronization follows the selected packet format; repeated frequencies are rejected"
             if fixed
             else "",
             help=(
@@ -690,7 +692,13 @@ def available_choices(key: str, selection: Selection) -> tuple:
     if key == "profile.packet.format":
         return compatible_formats(selection.modulation)
     if key == "profile.frequency.mode":
-        return ("fixed", "hopping") if selection.packet_format == "simple-frame-v1" else ("fixed",)
+        return (
+            ("fixed", "hopping")
+            if selection.packet_format == "simple-frame-v1" or selection.device_type == "b200"
+            else ("fixed",)
+        )
+    if key == "profile.frequency.synchronization":
+        return ("rf-leader",) if selection.packet_format == "generic-v5" else ("external-utc",)
     if key == "profile.protection.scheme" and selection.packet_format == "generic-v5":
         return ("extended-hamming-8-4",)
     return field.choices
